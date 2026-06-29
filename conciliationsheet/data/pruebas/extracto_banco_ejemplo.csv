@@ -1,0 +1,15 @@
+Fecha,Descripcion,Debe,Haber,Saldo,Tipo
+2025-06-01,Saldo inicial,0,1250000,1250000,ingreso
+2025-06-02,Transferencia recibida - Cliente A,0,450000,1700000,ingreso
+2025-06-03,Pago proveedor - Servicios Generales,180000,0,1520000,egreso
+2025-06-05,Deposito efectivo - Sucursal,0,600000,2120000,ingreso
+2025-06-07,Transferencia emitida - Proveedor B,320000,0,1800000,egreso
+2025-06-10,Cobro tarjeta - Cliente C,0,250000,2050000,ingreso
+2025-06-12,Pago impuesto mensual,95000,0,1955000,egreso
+2025-06-15,Transferencia recibida - Cliente D,0,700000,2655000,ingreso
+2025-06-18,Pago alquiler local,280000,0,2375000,egreso
+2025-06-20,Honorarios contables,120000,0,2255000,egreso
+2025-06-22,Deposito cliente E,0,380000,2635000,ingreso
+2025-06-25,Transferencia - Proveedor F,150000,0,2485000,egreso
+2025-06-28,Pago servicios (luz/agua),67000,0,2418000,egreso
+2025-06-30,Comision bancaria mensual,35000,0,2383000,egreso

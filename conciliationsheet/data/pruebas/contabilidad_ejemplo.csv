@@ -1,0 +1,16 @@
+Fecha,Descripcion,Debe,Haber,Comprobante
+2025-06-02,Cobro factura A-001 - Cliente A,450000,0,FC-A001
+2025-06-03,Pago factura PROV-001 - Servicios Generales,0,180000,FC-PROV001
+2025-06-05,Deposito efectivo sucursal,600000,0,RC-001
+2025-06-07,Transferencia a Proveedor B,0,321000,FC-PROV002
+2025-06-08,Cobro factura X-001 - Cliente X,90000,0,FC-X001
+2025-06-10,Cobro factura C-001 - Cliente C,250000,0,FC-C001
+2025-06-12,Pago impuesto mensual,0,95000,FC-IMP001
+2025-06-15,Cobro factura D-001 - Cliente D,700000,0,FC-D001
+2025-06-18,Pago alquiler mes junio,0,280000,FC-ALQ001
+2025-06-20,Pago honorarios contables,0,120000,FC-HON001
+2025-06-21,Pago proveedor Z - Servicio consultoria,0,200000,FC-Z001
+2025-06-22,Deposito cliente E,380000,0,RC-002
+2025-06-25,Pago factura PROV-002 - Proveedor F,0,150000,FC-PROV003
+2025-06-28,Pago servicios publicos,0,67000,FC-SRV001
+2025-06-30,Comision bancaria,0,35000,FC-COM001

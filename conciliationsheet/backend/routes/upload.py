@@ -1,8 +1,10 @@
+import openpyxl
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 
 from config import UPLOADS_DIR
+from database.db import get_connection
 from utils.validators import validar_extension
 from utils.helpers import generar_nombre_unico
 
@@ -62,5 +64,40 @@ def delete_archivo(filename):
     ruta = UPLOADS_DIR / filename
     if not ruta.exists():
         return jsonify({"error": "Archivo no encontrado"}), 404
+
+    fuente = _detectar_fuente(str(ruta))
+
     ruta.unlink(missing_ok=True)
-    return jsonify({"message": "Archivo eliminado", "archivo": filename}), 200
+
+    if fuente:
+        conn = get_connection()
+        try:
+            tabla = "movimientos_bancarios" if fuente == "banco" else "movimientos_contables"
+            conn.execute(f"DELETE FROM {tabla} WHERE cuenta_id=1")
+            conn.execute("DELETE FROM sqlite_sequence WHERE name=?", (tabla,))
+            conn.commit()
+            return jsonify({
+                "message": f"Archivo eliminado y movimientos de {fuente} removidos",
+                "archivo": filename,
+                "fuente": fuente,
+            }), 200
+        finally:
+            conn.close()
+    else:
+        return jsonify({"message": "Archivo eliminado (no se pudo determinar fuente)", "archivo": filename}), 200
+
+
+def _detectar_fuente(ruta: str) -> str | None:
+    try:
+        wb = openpyxl.load_workbook(ruta, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(min_row=1, max_row=5, values_only=True))
+        wb.close()
+        texto = " ".join(str(c or "") for row in rows for c in row).lower()
+        if "contabilidad" in texto:
+            return "contabilidad"
+        if "banco" in texto or "extracto" in texto and "bancario" in texto:
+            return "banco"
+        return None
+    except Exception:
+        return None

@@ -10,11 +10,12 @@ class PartidaConciliatoria:
     cuenta_id: int = 0
     fecha: str = ""
     descripcion: str = ""
-    tipo: Optional[str] = None
-    origen: Optional[str] = None
-    debe: float = 0.0
-    haber: float = 0.0
-    saldo_afectado: Optional[str] = None
+    monto: float = 0.0
+    signo: int = 1
+    origen: str = ""
+    tipo: str = ""
+    afecta: str = ""
+    clasificacion: str = ""
     estado: str = "pendiente"
     fecha_resolucion: Optional[str] = None
     observaciones: Optional[str] = None
@@ -25,11 +26,12 @@ class PartidaConciliatoria:
             "cuenta_id": self.cuenta_id,
             "fecha": self.fecha,
             "descripcion": self.descripcion,
-            "tipo": self.tipo,
+            "monto": self.monto,
+            "signo": self.signo,
             "origen": self.origen,
-            "debe": self.debe,
-            "haber": self.haber,
-            "saldo_afectado": self.saldo_afectado,
+            "tipo": self.tipo,
+            "afecta": self.afecta,
+            "clasificacion": self.clasificacion,
             "estado": self.estado,
             "fecha_resolucion": self.fecha_resolucion,
             "observaciones": self.observaciones,
@@ -42,40 +44,41 @@ class PartidaConciliatoria:
             cuenta_id=row["cuenta_id"],
             fecha=row["fecha"],
             descripcion=row["descripcion"],
-            tipo=row["tipo"],
+            monto=row["monto"],
+            signo=row["signo"],
             origen=row["origen"],
-            debe=row["debe"],
-            haber=row["haber"],
-            saldo_afectado=row["saldo_afectado"],
+            tipo=row["tipo"],
+            afecta=row["afecta"],
+            clasificacion=row["clasificacion"],
             estado=row["estado"],
             fecha_resolucion=row["fecha_resolucion"],
             observaciones=row["observaciones"],
         )
 
     def guardar(self) -> int:
-        if self.debe < 0 or self.haber < 0:
-            raise ValueError("Los montos Debe/Haber no pueden ser negativos")
-        if self.tipo == "transitoria" and self.estado not in ("pendiente", "resuelta"):
-            raise ValueError("Estado invalido para partida transitoria. Use: pendiente, resuelta")
+        if self.monto < 0:
+            raise ValueError("El monto no puede ser negativo")
         conn = get_connection()
         try:
             if self.id is None:
                 cursor = conn.execute(
                     """INSERT INTO partidas_conciliatorias
-                       (cuenta_id, fecha, descripcion, tipo, origen, debe, haber, saldo_afectado, estado, fecha_resolucion, observaciones)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (self.cuenta_id, self.fecha, self.descripcion, self.tipo, self.origen,
-                     self.debe, self.haber, self.saldo_afectado, self.estado, self.fecha_resolucion, self.observaciones),
+                       (cuenta_id, fecha, descripcion, monto, signo, origen, tipo, afecta, clasificacion, estado, fecha_resolucion, observaciones)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (self.cuenta_id, self.fecha, self.descripcion, self.monto, self.signo,
+                     self.origen, self.tipo, self.afecta, self.clasificacion,
+                     self.estado, self.fecha_resolucion, self.observaciones),
                 )
                 self.id = cursor.lastrowid
             else:
                 conn.execute(
                     """UPDATE partidas_conciliatorias
-                       SET cuenta_id=?, fecha=?, descripcion=?, tipo=?, origen=?, debe=?, haber=?,
-                           saldo_afectado=?, estado=?, fecha_resolucion=?, observaciones=?
+                       SET cuenta_id=?, fecha=?, descripcion=?, monto=?, signo=?, origen=?, tipo=?,
+                           afecta=?, clasificacion=?, estado=?, fecha_resolucion=?, observaciones=?
                        WHERE id=?""",
-                    (self.cuenta_id, self.fecha, self.descripcion, self.tipo, self.origen,
-                     self.debe, self.haber, self.saldo_afectado, self.estado, self.fecha_resolucion, self.observaciones, self.id),
+                    (self.cuenta_id, self.fecha, self.descripcion, self.monto, self.signo,
+                     self.origen, self.tipo, self.afecta, self.clasificacion,
+                     self.estado, self.fecha_resolucion, self.observaciones, self.id),
                 )
             conn.commit()
             return self.id

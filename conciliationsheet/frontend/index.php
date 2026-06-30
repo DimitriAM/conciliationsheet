@@ -13,6 +13,7 @@
         <a href="?view=upload" class="<?= ($_GET['view'] ?? 'upload') === 'upload' ? 'active' : '' ?>">Subir</a>
         <a href="?view=dashboard" class="<?= ($_GET['view'] ?? '') === 'dashboard' ? 'active' : '' ?>">Dashboard</a>
         <a href="?view=reports" class="<?= ($_GET['view'] ?? '') === 'reports' ? 'active' : '' ?>">Reportes</a>
+        <a href="?view=settings" class="<?= ($_GET['view'] ?? '') === 'settings' ? 'active' : '' ?>">Settings</a>
     </nav>
     <main>
         <?php

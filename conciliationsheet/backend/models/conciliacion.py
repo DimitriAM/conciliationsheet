@@ -3,7 +3,6 @@ from datetime import datetime
 from typing import Optional
 
 from database.db import get_connection
-from models.detalle_conciliacion import DetalleConciliacion
 
 
 @dataclass
@@ -131,8 +130,3 @@ class Conciliacion:
             return Conciliacion.from_row(dict(row)) if row else None
         finally:
             conn.close()
-
-    def obtener_detalles(self) -> list["DetalleConciliacion"]:
-        if self.id is None:
-            return []
-        return DetalleConciliacion.obtener_por_conciliacion(self.id)

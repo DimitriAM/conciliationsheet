@@ -6,7 +6,7 @@ import openpyxl
 
 from models.movimiento_bancario import MovimientoBancario
 from models.movimiento_contable import MovimientoContable
-from utils.helpers import detectar_columnas, parsear_monto, SINONIMOS
+from utils.helpers import detectar_columnas, parsear_monto, parsear_saldo, SINONIMOS
 from utils.validators import sanitizar_descripcion
 
 
@@ -61,7 +61,9 @@ def leer_excel(ruta: str) -> list[dict[str, Any]]:
         registro = {}
         for clave, idx in columnas.items():
             valor = _extraer_valor(row, idx)
-            if clave in ("monto", "debe", "haber"):
+            if clave == "saldo":
+                registro[clave] = parsear_saldo(valor) if valor is not None else 0.0
+            elif clave in ("monto", "debe", "haber"):
                 registro[clave] = parsear_monto(valor) if valor is not None else 0.0
             elif clave == "fecha":
                 if valor is not None:
@@ -191,6 +193,7 @@ def procesar_archivo_a_movimientos(
                 descripcion=descripcion,
                 debe=debe,
                 haber=haber,
+                saldo=saldo_valor,
             ))
 
     return movimientos

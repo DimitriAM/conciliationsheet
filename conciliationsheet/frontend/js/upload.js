@@ -126,10 +126,13 @@ function setupUploadHandler(handler, statusId, fuente) {
 
             const archivo = data.archivo.nombre_archivo;
 
+            const saldoFinalInput = document.getElementById(fuente === 'banco' ? 'saldoFinalBanco' : 'saldoFinalContable');
+            const saldoFinal = saldoFinalInput ? (parseFloat(saldoFinalInput.value) || null) : null;
+
             const res2 = await fetch(API + '/process', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ archivo, cuenta_id: defaultCuentaId, fuente }),
+                body: JSON.stringify({ archivo, cuenta_id: defaultCuentaId, fuente, saldo_final: saldoFinal }),
             });
             const data2 = await res2.json();
 
@@ -307,3 +310,5 @@ async function guardarEntradaDiccionario() {
         notify('Error de conexión', 'error');
     }
 }
+
+

@@ -55,6 +55,7 @@ CREATE TABLE movimientos_contables (
     descripcion TEXT NOT NULL,
     debe REAL DEFAULT 0,             -- INGRESO segun empresa (aumenta activo)
     haber REAL DEFAULT 0,            -- EGRESO segun empresa (disminuye activo)
+    saldo REAL,
     comprobante TEXT,
     conciliado BOOLEAN DEFAULT 0,
     FOREIGN KEY (cuenta_id) REFERENCES cuentas_bancarias(id) ON DELETE CASCADE
@@ -65,12 +66,13 @@ CREATE TABLE partidas_conciliatorias (
     cuenta_id INTEGER NOT NULL,
     fecha DATE NOT NULL,
     descripcion TEXT NOT NULL,
-    tipo TEXT CHECK(tipo IN ('permanente','transitoria')),
-    origen TEXT CHECK(origen IN ('banco_no_contabilizado','contabilidad_no_banco','error_bancario')),
-    debe REAL DEFAULT 0,
-    haber REAL DEFAULT 0,
-    saldo_afectado TEXT CHECK(saldo_afectado IN ('banco','contabilidad')),
-    estado TEXT DEFAULT 'pendiente' CHECK(estado IN ('pendiente','ajustada','resuelta')),
+    monto REAL NOT NULL DEFAULT 0,
+    signo INTEGER NOT NULL DEFAULT 1 CHECK(signo IN (1, -1)),
+    origen TEXT NOT NULL CHECK(origen IN ('contabilidad', 'banco')),
+    tipo TEXT NOT NULL CHECK(tipo IN ('cheque_no_debitado', 'deposito_no_acreditado', 'nota_debito_no_registrada', 'nota_credito_no_registrada', 'diferencia_contabilidad', 'diferencia_banco')),
+    afecta TEXT NOT NULL CHECK(afecta IN ('banco', 'contabilidad')),
+    clasificacion TEXT NOT NULL CHECK(clasificacion IN ('transitoria', 'permanente')),
+    estado TEXT DEFAULT 'pendiente' CHECK(estado IN ('pendiente', 'ajustada', 'resuelta')),
     fecha_resolucion DATE,
     observaciones TEXT,
     FOREIGN KEY (cuenta_id) REFERENCES cuentas_bancarias(id) ON DELETE CASCADE
@@ -81,7 +83,7 @@ CREATE TABLE conciliaciones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cuenta_id INTEGER NOT NULL,
     fecha_cierre DATE NOT NULL,
-    metodo TEXT CHECK(metodo IN ('desde_banco','desde_contabilidad','cuadrada')),
+    metodo TEXT CHECK(metodo IN ('desde_contabilidad')),
     vision TEXT DEFAULT 'empresa' CHECK(vision IN ('empresa','banco')),
     saldo_segun_banco REAL,
     saldo_segun_contabilidad REAL,
@@ -94,22 +96,10 @@ CREATE TABLE conciliaciones (
     FOREIGN KEY (cuenta_id) REFERENCES cuentas_bancarias(id) ON DELETE CASCADE
 );
 
-CREATE TABLE detalles_conciliacion (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conciliacion_id INTEGER NOT NULL,
-    movimiento_id INTEGER,
-    tabla_origen TEXT CHECK(tabla_origen IN ('movimientos_bancarios','movimientos_contables')),
-    monto_debe REAL DEFAULT 0,
-    monto_haber REAL DEFAULT 0,
-    estado TEXT DEFAULT 'coincide' CHECK(estado IN ('coincide','diferencia','partida_conciliatoria')),
-    FOREIGN KEY (conciliacion_id) REFERENCES conciliaciones(id) ON DELETE CASCADE
-);
-
 CREATE INDEX idx_movimientos_bancarios_cuenta_fecha ON movimientos_bancarios(cuenta_id, fecha);
 CREATE INDEX idx_movimientos_contables_cuenta_fecha ON movimientos_contables(cuenta_id, fecha);
 CREATE INDEX idx_partidas_conciliatorias_cuenta ON partidas_conciliatorias(cuenta_id);
 CREATE INDEX idx_conciliaciones_cuenta ON conciliaciones(cuenta_id);
-CREATE INDEX idx_detalles_conciliacion_conciliacion ON detalles_conciliacion(conciliacion_id);
 
 CREATE TABLE diccionario_sinonimos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

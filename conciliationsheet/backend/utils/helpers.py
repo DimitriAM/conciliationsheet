@@ -85,3 +85,14 @@ def parsear_monto(valor: Any) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+def parsear_saldo(valor: Any) -> float:
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, str):
+        limpio = valor.replace("$", "").replace(",", "").replace(" ", "").strip()
+        try:
+            return float(limpio)
+        except ValueError:
+            return 0.0
+    return 0.0

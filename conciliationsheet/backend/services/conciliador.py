@@ -1,210 +1,100 @@
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional
+import difflib
 
 from database.db import get_connection
-from models.cuenta_bancaria import CuentaBancaria
-from models.movimiento_bancario import MovimientoBancario
-from models.movimiento_contable import MovimientoContable
-from models.partida_conciliatoria import PartidaConciliatoria
 from models.conciliacion import Conciliacion
-from models.detalle_conciliacion import DetalleConciliacion
-from utils.helpers import coinciden_descripciones, normalizar_descripcion
+from models.partida_conciliatoria import PartidaConciliatoria
+from utils.helpers import coinciden_descripciones
 
 
 class ConciliadorBancario:
-    def __init__(self, cuenta_id: int, fecha_desde: str, fecha_hasta: str,
-                 saldo_final_banco: Optional[float] = None,
-                 saldo_final_contable: Optional[float] = None,
-                 saldo_inicial_banco: Optional[float] = None,
-                 saldo_inicial_contable: Optional[float] = None):
-        self.cuenta_id = cuenta_id
-        self.fecha_desde = fecha_desde
-        self.fecha_hasta = fecha_hasta
-        self._saldo_final_banco = saldo_final_banco
-        self._saldo_final_contable = saldo_final_contable
-        self._saldo_inicial_banco = saldo_inicial_banco
-        self._saldo_inicial_contable = saldo_inicial_contable
+    def __init__(self):
+        self.cuenta_id = None
+        self.fecha_desde = None
+        self.fecha_hasta = None
         self._tolerancia = 0.01
-        self._cargar_diccionario()
 
-    def _cargar_diccionario(self):
-        conn = get_connection()
-        try:
-            rows = conn.execute(
-                "SELECT fuente, patron, tipo FROM diccionario_sinonimos WHERE activo=1"
-            ).fetchall()
-            self._diccionario = {}  # fuente -> [(patron, tipo)]
-            for r in rows:
-                f = r["fuente"]
-                if f not in self._diccionario:
-                    self._diccionario[f] = []
-                self._diccionario[f].append((r["patron"].lower(), r["tipo"]))
-        finally:
-            conn.close()
+    STOPWORDS = frozenset({
+        "de", "la", "el", "en", "del", "con", "por", "para", "un", "una",
+        "al", "lo", "los", "las", "su", "se", "no", "es", "y", "e", "a",
+        "que", "le", "x", "s", "p", "c", "d",
+    })
 
-    def _coinciden_descripciones_con_diccionario(self, desc_a: str, desc_b: str) -> bool:
-        if coinciden_descripciones(desc_a, desc_b):
+    @staticmethod
+    def _clasificar_por_tipo(tipo: str) -> str:
+        return "transitoria" if tipo in ("cheque_no_debitado", "deposito_no_acreditado") else "permanente"
+
+    @staticmethod
+    def _comparten_palabras_clave(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        tokens_a = {w for w in a.lower().split() if len(w) > 2}
+        tokens_b = {w for w in b.lower().split() if len(w) > 2}
+        tokens_a -= ConciliadorBancario.STOPWORDS
+        tokens_b -= ConciliadorBancario.STOPWORDS
+        return bool(tokens_a & tokens_b)
+
+    def _descripciones_similares(self, a: str, b: str) -> bool:
+        if coinciden_descripciones(a, b):
             return True
-        da = desc_a.lower().strip()
-        db = desc_b.lower().strip()
-        for fuente, entries in self._diccionario.items():
-            for patron, tipo in entries:
-                if patron in da and patron in db:
-                    return True
-        return False
-
-    def _convertir_saldo_banco_a_empresa(self, saldo_banco_vision: float) -> float:
-        return saldo_banco_vision
-
-    def _convertir_movimiento_banco_a_empresa(self, mov: dict) -> dict:
-        mov_empresa = dict(mov)
-        mov_empresa["debe"] = mov["haber"]
-        mov_empresa["haber"] = mov["debe"]
-        return mov_empresa
+        if not a or not b:
+            return False
+        if self._comparten_palabras_clave(a, b):
+            return True
+        ratio = difflib.SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+        return ratio > 0.6
 
     def _obtener_saldo_banco(self) -> float:
-        if self._saldo_final_banco is not None:
-            return self._saldo_final_banco
         conn = get_connection()
         try:
-            cuenta = CuentaBancaria.obtener_por_id(self.cuenta_id)
-            saldo_inicial = cuenta.saldo_inicial if cuenta else 0.0
             row = conn.execute(
+                """SELECT saldo FROM movimientos_bancarios
+                   WHERE cuenta_id=? AND fecha <= ?
+                   ORDER BY fecha DESC, id DESC LIMIT 1""",
+                (self.cuenta_id, self.fecha_hasta),
+            ).fetchone()
+            if row is None:
+                return 0.0
+            saldo = row["saldo"]
+            if saldo is not None and isinstance(saldo, (int, float)):
+                return float(saldo)
+            fallback = conn.execute(
                 """SELECT COALESCE(SUM(haber), 0) - COALESCE(SUM(debe), 0) AS saldo
                    FROM movimientos_bancarios
-                   WHERE cuenta_id=? AND fecha BETWEEN ? AND ?""",
-                (self.cuenta_id, self.fecha_desde, self.fecha_hasta),
+                   WHERE cuenta_id=? AND fecha <= ?""",
+                (self.cuenta_id, self.fecha_hasta),
             ).fetchone()
-            return saldo_inicial + (row["saldo"] if row else 0.0)
+            return round(fallback["saldo"], 2) if fallback else 0.0
         finally:
             conn.close()
 
     def _obtener_saldo_contabilidad(self) -> float:
-        if self._saldo_final_contable is not None:
-            return self._saldo_final_contable
         conn = get_connection()
         try:
-            cuenta = CuentaBancaria.obtener_por_id(self.cuenta_id)
-            saldo_inicial = cuenta.saldo_inicial if cuenta else 0.0
             row = conn.execute(
-                """SELECT COALESCE(SUM(debe), 0) - COALESCE(SUM(haber), 0) AS saldo
-                   FROM movimientos_contables
-                   WHERE cuenta_id=? AND fecha BETWEEN ? AND ?""",
-                (self.cuenta_id, self.fecha_desde, self.fecha_hasta),
+                """SELECT saldo FROM movimientos_contables
+                   WHERE cuenta_id=? AND fecha <= ?
+                   ORDER BY fecha DESC, id DESC LIMIT 1""",
+                (self.cuenta_id, self.fecha_hasta),
             ).fetchone()
-            return saldo_inicial + (row["saldo"] if row else 0.0)
-        finally:
-            conn.close()
-
-    def _obtener_saldo_banco_hasta(self, fecha: str) -> float:
-        conn = get_connection()
-        try:
-            cuenta = CuentaBancaria.obtener_por_id(self.cuenta_id)
-            saldo_inicial = cuenta.saldo_inicial if cuenta else 0.0
-            row = conn.execute(
-                """SELECT COALESCE(SUM(haber), 0) - COALESCE(SUM(debe), 0) AS saldo
-                   FROM movimientos_bancarios
-                   WHERE cuenta_id=? AND fecha <= ?""",
-                (self.cuenta_id, fecha),
-            ).fetchone()
-            return saldo_inicial + (row["saldo"] if row else 0.0)
-        finally:
-            conn.close()
-
-    def _obtener_saldo_contabilidad_hasta(self, fecha: str) -> float:
-        conn = get_connection()
-        try:
-            cuenta = CuentaBancaria.obtener_por_id(self.cuenta_id)
-            saldo_inicial = cuenta.saldo_inicial if cuenta else 0.0
-            row = conn.execute(
+            if row is None:
+                return 0.0
+            saldo = row["saldo"]
+            if saldo is not None and isinstance(saldo, (int, float)):
+                return float(saldo)
+            fallback = conn.execute(
                 """SELECT COALESCE(SUM(debe), 0) - COALESCE(SUM(haber), 0) AS saldo
                    FROM movimientos_contables
                    WHERE cuenta_id=? AND fecha <= ?""",
-                (self.cuenta_id, fecha),
+                (self.cuenta_id, self.fecha_hasta),
             ).fetchone()
-            return saldo_inicial + (row["saldo"] if row else 0.0)
+            return round(fallback["saldo"], 2) if fallback else 0.0
         finally:
             conn.close()
 
-    def _movimientos_banco_periodo(self) -> list[dict]:
+    def _identificar_partidas(self) -> list[dict]:
         conn = get_connection()
         try:
-            rows = conn.execute(
-                """SELECT * FROM movimientos_bancarios
-                   WHERE cuenta_id=? AND fecha BETWEEN ? AND ?
-                   ORDER BY fecha, id""",
-                (self.cuenta_id, self.fecha_desde, self.fecha_hasta),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
-
-    def _movimientos_contabilidad_periodo(self) -> list[dict]:
-        conn = get_connection()
-        try:
-            rows = conn.execute(
-                """SELECT * FROM movimientos_contables
-                   WHERE cuenta_id=? AND fecha BETWEEN ? AND ?
-                   ORDER BY fecha, id""",
-                (self.cuenta_id, self.fecha_desde, self.fecha_hasta),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        finally:
-            conn.close()
-
-    @staticmethod
-    def _montos_coinciden(monto_a: float, monto_b: float, tolerancia: float = 0.01) -> bool:
-        if monto_a == 0 and monto_b == 0:
-            return True
-        if max(monto_a, monto_b) == 0:
-            return False
-        return abs(monto_a - monto_b) / max(abs(monto_a), abs(monto_b), 0.01) <= tolerancia
-
-    def _filtrar_no_match(self, items: list[dict], candidatos: list[dict],
-                          campo_monto_item: str, campo_monto_cand: str) -> list[dict]:
-        tolerancia_amplia = 0.10
-        no_match = []
-        for item in items:
-            monto_item = abs(item.get(campo_monto_item, 0))
-            desc_item = item.get("descripcion", "") or ""
-            matched = False
-
-            # Pass 1: match exacto por monto (±1%)
-            for cand in candidatos:
-                monto_cand = abs(cand.get(campo_monto_cand, 0))
-                if ConciliadorBancario._montos_coinciden(monto_item, monto_cand):
-                    matched = True
-                    break
-
-            # Pass 2: monto cercano (±10%) Y descripcion coincidente
-            if not matched and desc_item.strip():
-                for cand in candidatos:
-                    desc_cand = cand.get("descripcion", "") or ""
-                    if not desc_cand.strip():
-                        continue
-                    monto_cand = abs(cand.get(campo_monto_cand, 0))
-                    if not ConciliadorBancario._montos_coinciden(monto_item, monto_cand, tolerancia_amplia):
-                        continue
-                    if self._coinciden_descripciones_con_diccionario(desc_item, desc_cand):
-                        matched = True
-                        break
-
-            if not matched:
-                no_match.append(item)
-        return no_match
-
-    def _identificar_partidas_empresa(self) -> dict:
-        conn = get_connection()
-        try:
-            bancos = conn.execute(
-                """SELECT * FROM movimientos_bancarios
-                   WHERE cuenta_id=? AND fecha BETWEEN ? AND ?
-                   ORDER BY fecha, id""",
-                (self.cuenta_id, self.fecha_desde, self.fecha_hasta),
-            ).fetchall()
-            bancos = [dict(r) for r in bancos]
-
+            # Obtener todos los registros del periodo
             contables = conn.execute(
                 """SELECT * FROM movimientos_contables
                    WHERE cuenta_id=? AND fecha BETWEEN ? AND ?
@@ -213,45 +103,209 @@ class ConciliadorBancario:
             ).fetchall()
             contables = [dict(r) for r in contables]
 
-            cta_haber = [c for c in contables if c.get("haber", 0) > 0]
-            cta_debe = [c for c in contables if c.get("debe", 0) > 0]
-            banco_debe = [b for b in bancos if b.get("debe", 0) > 0]
-            banco_haber = [b for b in bancos if b.get("haber", 0) > 0]
-
-            cheques_raw = self._filtrar_no_match(cta_haber, banco_debe, "haber", "debe")
-            depositos_raw = self._filtrar_no_match(cta_debe, banco_haber, "debe", "haber")
-            notas_db_raw = self._filtrar_no_match(banco_debe, cta_haber, "debe", "haber")
-            notas_cr_raw = self._filtrar_no_match(banco_haber, cta_debe, "haber", "debe")
-
-            def item_to_dict(m, campo_monto):
-                return {
-                    "id": m["id"],
-                    "fecha": m["fecha"],
-                    "descripcion": m.get("descripcion", ""),
-                    "monto": m.get(campo_monto, 0),
-                    "comprobante": m.get("comprobante"),
-                    "tipo": m.get("tipo"),
-                }
-
-            return {
-                "cheques_no_debitados": [item_to_dict(c, "haber") for c in cheques_raw],
-                "depositos_no_acreditados": [item_to_dict(d, "debe") for d in depositos_raw],
-                "notas_debito_no_registradas": [item_to_dict(n, "debe") for n in notas_db_raw],
-                "notas_credito_no_registradas": [item_to_dict(n, "haber") for n in notas_cr_raw],
-            }
-        finally:
-            conn.close()
-
-    def _partidas_conciliatorias_mes_anterior(self) -> list[dict]:
-        conn = get_connection()
-        try:
-            rows = conn.execute(
-                """SELECT * FROM partidas_conciliatorias
-                   WHERE cuenta_id=? AND fecha < ? AND estado='pendiente'
+            bancos = conn.execute(
+                """SELECT * FROM movimientos_bancarios
+                   WHERE cuenta_id=? AND fecha BETWEEN ? AND ?
                    ORDER BY fecha, id""",
-                (self.cuenta_id, self.fecha_desde),
+                (self.cuenta_id, self.fecha_desde, self.fecha_hasta),
             ).fetchall()
-            return [dict(r) for r in rows]
+            bancos = [dict(r) for r in bancos]
+
+            partidas = []
+            ids_contable_usados = set()
+            ids_banco_usados = set()
+
+            # ─── FASE 1: diferencias por monto (misma fecha, desc similar, monto distinto) ───
+
+            for mc in contables:
+                if mc["id"] in ids_contable_usados:
+                    continue
+                for mb in bancos:
+                    if mb["id"] in ids_banco_usados:
+                        continue
+                    if mc["fecha"] != mb["fecha"]:
+                        continue
+                    if not self._descripciones_similares(mc["descripcion"] or "", mb["descripcion"] or ""):
+                        continue
+
+                    def _agregar_diferencia(tipo, monto, signo, fecha, desc, origen,
+                                              monto_cont=None, signo_cont=None,
+                                              monto_banco=None, signo_banco=None):
+                        if abs(monto) >= self._tolerancia:
+                            ids_contable_usados.add(mc["id"])
+                            ids_banco_usados.add(mb["id"])
+                            partida = {
+                                "fecha": fecha,
+                                "descripcion": desc,
+                                "monto": round(abs(monto), 2),
+                                "signo": signo,
+                                "origen": origen,
+                                "tipo": tipo,
+                                "afecta": "banco" if origen == "contabilidad" else "contabilidad",
+                            }
+                            if monto_cont is not None:
+                                partida["_monto_cont"] = round(monto_cont, 2)
+                                partida["_signo_cont"] = signo_cont
+                                partida["_monto_banco"] = round(monto_banco, 2)
+                                partida["_signo_banco"] = signo_banco
+                            partidas.append(partida)
+                            return True
+                        return False
+
+                    diff = 0
+                    # HABER <-> DEBE: egreso/cargo (ambos reducen saldo)
+                    if mc["haber"] > 0 and mb["debe"] > 0:
+                        diff = mc["haber"] - mb["debe"]
+                        if abs(diff) >= self._tolerancia:
+                            mc_amt = mc["haber"]
+                            mb_amt = mb["debe"]
+                            if diff > 0:
+                                _agregar_diferencia("diferencia_contabilidad", diff, 1, mc["fecha"], mc["descripcion"], "contabilidad",
+                                    monto_cont=mc_amt, signo_cont=1, monto_banco=mb_amt, signo_banco=-1)
+                            else:
+                                _agregar_diferencia("diferencia_banco", diff, -1, mb["fecha"], mb["descripcion"], "banco",
+                                    monto_cont=mc_amt, signo_cont=1, monto_banco=mb_amt, signo_banco=-1)
+                            break
+
+                    # DEBE <-> HABER: ingreso/abono (ambos aumentan saldo)
+                    elif mc["debe"] > 0 and mb["haber"] > 0:
+                        diff = mc["debe"] - mb["haber"]
+                        if abs(diff) >= self._tolerancia:
+                            mc_amt = mc["debe"]
+                            mb_amt = mb["haber"]
+                            if diff > 0:
+                                _agregar_diferencia("diferencia_contabilidad", diff, -1, mc["fecha"], mc["descripcion"], "contabilidad",
+                                    monto_cont=mc_amt, signo_cont=-1, monto_banco=mb_amt, signo_banco=1)
+                            else:
+                                _agregar_diferencia("diferencia_banco", diff, 1, mb["fecha"], mb["descripcion"], "banco",
+                                    monto_cont=mc_amt, signo_cont=-1, monto_banco=mb_amt, signo_banco=1)
+                            break
+
+                    # DEBE <-> DEBE: ambos cargos/debitos
+                    if mc["debe"] > 0 and mb["debe"] > 0:
+                        diff = mc["debe"] - mb["debe"]
+                        if abs(diff) >= self._tolerancia:
+                            mc_amt = mc["debe"]
+                            mb_amt = mb["debe"]
+                            if diff > 0:
+                                _agregar_diferencia("diferencia_contabilidad", diff, 1, mc["fecha"], mc["descripcion"], "contabilidad",
+                                    monto_cont=mc_amt, signo_cont=1, monto_banco=mb_amt, signo_banco=-1)
+                            else:
+                                _agregar_diferencia("diferencia_banco", diff, -1, mb["fecha"], mb["descripcion"], "banco",
+                                    monto_cont=mc_amt, signo_cont=1, monto_banco=mb_amt, signo_banco=-1)
+                            break
+
+                    # HABER <-> HABER: ambos ingresos/acreditaciones
+                    if mc["haber"] > 0 and mb["haber"] > 0:
+                        diff = mc["haber"] - mb["haber"]
+                        if abs(diff) >= self._tolerancia:
+                            mc_amt = mc["haber"]
+                            mb_amt = mb["haber"]
+                            if diff > 0:
+                                _agregar_diferencia("diferencia_contabilidad", diff, -1, mc["fecha"], mc["descripcion"], "contabilidad",
+                                    monto_cont=mc_amt, signo_cont=-1, monto_banco=mb_amt, signo_banco=1)
+                            else:
+                                _agregar_diferencia("diferencia_banco", diff, 1, mb["fecha"], mb["descripcion"], "banco",
+                                    monto_cont=mc_amt, signo_cont=-1, monto_banco=mb_amt, signo_banco=1)
+                            break
+
+            # ─── FASE 2: registros NO MATCH (sin contrapartida exacta por fecha+monto) ───
+
+            # Construir sets para matching exacto (fecha, monto_redondeado)
+            banco_exact_haber = set()
+            banco_exact_debe = set()
+            for mb in bancos:
+                if mb["id"] not in ids_banco_usados:
+                    if mb["haber"] > 0:
+                        banco_exact_haber.add((mb["fecha"], round(mb["haber"], 2)))
+                    if mb["debe"] > 0:
+                        banco_exact_debe.add((mb["fecha"], round(mb["debe"], 2)))
+
+            contable_exact_haber = set()
+            contable_exact_debe = set()
+            for mc in contables:
+                if mc["id"] not in ids_contable_usados:
+                    if mc["haber"] > 0:
+                        contable_exact_haber.add((mc["fecha"], round(mc["haber"], 2)))
+                    if mc["debe"] > 0:
+                        contable_exact_debe.add((mc["fecha"], round(mc["debe"], 2)))
+
+            # 2a. Cheques no debitados: contabilidad HABER sin match en banco DEBE
+            for mc in contables:
+                if mc["id"] in ids_contable_usados:
+                    continue
+                if mc["haber"] <= 0:
+                    continue
+                key = (mc["fecha"], round(mc["haber"], 2))
+                if key not in banco_exact_debe:
+                    partidas.append({
+                        "fecha": mc["fecha"],
+                        "descripcion": mc["descripcion"],
+                        "monto": mc["haber"],
+                        "signo": 1,
+                        "origen": "contabilidad",
+                        "tipo": "cheque_no_debitado",
+                        "afecta": "banco",
+                    })
+
+            # 2b. Depositos no acreditados: contabilidad DEBE sin match en banco HABER
+            for mc in contables:
+                if mc["id"] in ids_contable_usados:
+                    continue
+                if mc["debe"] <= 0:
+                    continue
+                key = (mc["fecha"], round(mc["debe"], 2))
+                if key not in banco_exact_haber:
+                    partidas.append({
+                        "fecha": mc["fecha"],
+                        "descripcion": mc["descripcion"],
+                        "monto": mc["debe"],
+                        "signo": -1,
+                        "origen": "contabilidad",
+                        "tipo": "deposito_no_acreditado",
+                        "afecta": "banco",
+                    })
+
+            # 2c. Notas de debito no registradas: banco DEBE sin match en contabilidad HABER
+            for mb in bancos:
+                if mb["id"] in ids_banco_usados:
+                    continue
+                if mb["debe"] <= 0:
+                    continue
+                key = (mb["fecha"], round(mb["debe"], 2))
+                if key not in contable_exact_haber:
+                    partidas.append({
+                        "fecha": mb["fecha"],
+                        "descripcion": mb["descripcion"],
+                        "monto": mb["debe"],
+                        "signo": -1,
+                        "origen": "banco",
+                        "tipo": "nota_debito_no_registrada",
+                        "afecta": "contabilidad",
+                    })
+
+            # 2d. Notas de credito no registradas: banco HABER sin match en contabilidad DEBE
+            for mb in bancos:
+                if mb["id"] in ids_banco_usados:
+                    continue
+                if mb["haber"] <= 0:
+                    continue
+                key = (mb["fecha"], round(mb["haber"], 2))
+                if key not in contable_exact_debe:
+                    partidas.append({
+                        "fecha": mb["fecha"],
+                        "descripcion": mb["descripcion"],
+                        "monto": mb["haber"],
+                        "signo": 1,
+                        "origen": "banco",
+                        "tipo": "nota_credito_no_registrada",
+                        "afecta": "contabilidad",
+                    })
+
+            for p in partidas:
+                p["clasificacion"] = self._clasificar_por_tipo(p["tipo"])
+
+            return partidas
         finally:
             conn.close()
 
@@ -263,291 +317,147 @@ class ConciliadorBancario:
         finally:
             conn.close()
 
-    def _guardar_conciliacion(self, datos: dict) -> Conciliacion:
-        reg = Conciliacion(
+    def conciliar_forma_1(self, cuenta_id: int, fecha_desde: str, fecha_hasta: str) -> dict:
+        self.cuenta_id = cuenta_id
+        self.fecha_desde = fecha_desde
+        self.fecha_hasta = fecha_hasta
+
+        self._limpiar_partidas_anteriores()
+
+        saldo_contable = self._obtener_saldo_contabilidad()
+        saldo_banco = self._obtener_saldo_banco()
+        partidas = self._identificar_partidas()
+
+        total_transitorias = sum(p["monto"] * p["signo"] for p in partidas if p["clasificacion"] == "transitoria")
+        total_permanentes = sum(p["monto"] * p["signo"] for p in partidas if p["clasificacion"] == "permanente")
+        total_positivas = sum(p["monto"] * p["signo"] for p in partidas if p["signo"] == 1)
+        total_negativas = sum(p["monto"] * p["signo"] for p in partidas if p["signo"] == -1)
+        saldo_ajustado = round(saldo_contable + total_transitorias + total_permanentes, 2)
+
+        diferencia = round(saldo_banco - saldo_ajustado, 2)
+        conciliado = abs(diferencia) <= self._tolerancia
+
+        conciliacion = Conciliacion(
             cuenta_id=self.cuenta_id,
-            fecha_cierre=datos["fecha_cierre"],
-            metodo=datos["metodo"],
+            fecha_cierre=self.fecha_hasta,
+            metodo="desde_contabilidad",
             vision="empresa",
-            saldo_segun_banco=datos["saldo_segun_banco"],
-            saldo_segun_contabilidad=datos["saldo_segun_contabilidad"],
-            saldo_ajustado_banco=datos["saldo_ajustado_banco"],
-            saldo_ajustado_contabilidad=datos["saldo_ajustado_contabilidad"],
-            diferencia_total=datos["diferencia"],
-            estado=datos["estado"],
+            saldo_segun_banco=saldo_banco,
+            saldo_segun_contabilidad=saldo_contable,
+            saldo_ajustado_banco=saldo_ajustado,
+            saldo_ajustado_contabilidad=saldo_contable,
+            diferencia_total=diferencia,
+            estado="conciliada" if conciliado else "pendiente_ajustes",
         )
-        reg.guardar()
-        return reg
+        conciliacion.guardar()
 
-    def _guardar_partida_conciliatoria(self, categoria: str, item: dict) -> PartidaConciliatoria:
-        es_transitoria = categoria in ("cheques_no_debitados", "depositos_no_acreditados")
-        tipo = "transitoria" if es_transitoria else "permanente"
-        origen = (
-            "contabilidad_no_banco"
-            if categoria in ("cheques_no_debitados", "depositos_no_acreditados")
-            else "banco_no_contabilizado"
-        )
-        saldo_afectado = "contabilidad" if origen == "banco_no_contabilizado" else "banco"
-        es_contra = categoria in ("cheques_no_debitados", "notas_debito_no_registradas")
-        monto = item["monto"]
-        pc = PartidaConciliatoria(
-            cuenta_id=self.cuenta_id,
-            fecha=item["fecha"],
-            descripcion=item["descripcion"],
-            tipo=tipo,
-            origen=origen,
-            debe=monto if es_contra else 0.0,
-            haber=monto if not es_contra else 0.0,
-            saldo_afectado=saldo_afectado,
-            estado="pendiente",
-        )
-        pc.guardar()
-        return pc
+        partidas_guardadas = []
+        for p in partidas:
+            pc = PartidaConciliatoria(
+                cuenta_id=self.cuenta_id,
+                fecha=p["fecha"],
+                descripcion=p["descripcion"],
+                monto=p["monto"],
+                signo=p["signo"],
+                origen=p["origen"],
+                tipo=p["tipo"],
+                afecta=p["afecta"],
+                clasificacion=p["clasificacion"],
+                estado="pendiente",
+            )
+            pc.guardar()
+            partidas_guardadas.append(pc)
 
-    def _agrupar_partidas(self, partidas: dict) -> dict:
-        totales = {}
-        for cat in ("cheques_no_debitados", "depositos_no_acreditados",
-                     "notas_debito_no_registradas", "notas_credito_no_registradas"):
-            totales[cat] = sum(p["monto"] for p in partidas[cat])
-        return totales
+        estado = "CONCILIADO" if conciliado else "PENDIENTE"
 
-    def _guardar_todas_partidas(self, partidas: dict) -> list[PartidaConciliatoria]:
-        guardadas = []
-        for cat in ("cheques_no_debitados", "depositos_no_acreditados",
-                     "notas_debito_no_registradas", "notas_credito_no_registradas"):
-            for item in partidas[cat]:
-                pc = self._guardar_partida_conciliatoria(cat, item)
-                guardadas.append(pc)
-        return guardadas
-
-    def conciliar_forma_1(self) -> dict:
-        """
-        Forma 1: Contabilidad → Banco
-        Parte del saldo contable, aplica ajustes, llega al saldo del extracto bancario.
-        """
-        self._limpiar_partidas_anteriores()
-        saldo_contable = self._obtener_saldo_contabilidad()
-        partidas = self._identificar_partidas_empresa()
-        totales = self._agrupar_partidas(partidas)
-
-        saldo_banco_calculado = (
-            saldo_contable
-            + totales["cheques_no_debitados"]
-            - totales["depositos_no_acreditados"]
-            - totales["notas_debito_no_registradas"]
-            + totales["notas_credito_no_registradas"]
-        )
-
-        saldo_banco = self._obtener_saldo_banco()
-        saldo_banco_empresa = self._convertir_saldo_banco_a_empresa(saldo_banco)
-        diferencia = round(saldo_banco_calculado - saldo_banco_empresa, 2)
-        conciliado = abs(diferencia) <= self._tolerancia
-        reg = self._guardar_conciliacion({
-            "fecha_cierre": self.fecha_hasta,
-            "metodo": "desde_banco",
-            "saldo_segun_banco": saldo_banco_empresa,
-            "saldo_segun_contabilidad": saldo_contable,
-            "saldo_ajustado_banco": saldo_banco_calculado,
-            "saldo_ajustado_contabilidad": saldo_contable,
-            "diferencia": diferencia,
-            "estado": "conciliada" if conciliado else "pendiente_ajustes",
+        partidas_ordenadas = sorted(partidas, key=lambda p: (p.get("fecha", ""), p.get("descripcion", "")))
+        desarrollo = []
+        saldo_parcial = saldo_contable
+        desarrollo.append({
+            "fecha": "-",
+            "descripcion": "SALDO CONTABLE",
+            "monto": "-",
+            "efecto": "-",
+            "saldo_parcial": saldo_parcial,
         })
-        partidas_guardadas = self._guardar_todas_partidas(partidas)
+        for p in partidas_ordenadas:
+            if "_monto_cont" in p:
+                # Mostrar ambas caras de la diferencia (contabilidad y banco)
+                mc_monto = round(p["_monto_cont"] * p["_signo_cont"], 2)
+                saldo_parcial = round(saldo_parcial + mc_monto, 2)
+                desarrollo.append({
+                    "fecha": p["fecha"],
+                    "descripcion": p["descripcion"] + " (Contabilidad)",
+                    "monto": mc_monto,
+                    "efecto": "Suma" if mc_monto > 0 else "Resta",
+                    "saldo_parcial": saldo_parcial,
+                })
+                mb_monto = round(p["_monto_banco"] * p["_signo_banco"], 2)
+                saldo_parcial = round(saldo_parcial + mb_monto, 2)
+                desarrollo.append({
+                    "fecha": p["fecha"],
+                    "descripcion": p["descripcion"] + " (Banco)",
+                    "monto": mb_monto,
+                    "efecto": "Suma" if mb_monto > 0 else "Resta",
+                    "saldo_parcial": saldo_parcial,
+                })
+            else:
+                monto_con_signo = round(p["monto"] * p["signo"], 2)
+                saldo_parcial = round(saldo_parcial + monto_con_signo, 2)
+                desarrollo.append({
+                    "fecha": p["fecha"],
+                    "descripcion": p["descripcion"],
+                    "monto": monto_con_signo,
+                    "efecto": "Suma" if monto_con_signo > 0 else "Resta",
+                    "saldo_parcial": saldo_parcial,
+                })
+        desarrollo.append({
+            "fecha": "-",
+            "descripcion": "SALDO CALCULADO",
+            "monto": "-",
+            "efecto": "-",
+            "saldo_parcial": round(saldo_contable + total_transitorias + total_permanentes, 2),
+        })
+        desarrollo.append({
+            "fecha": "-",
+            "descripcion": "SALDO BANCO (segun extracto)",
+            "monto": "-",
+            "efecto": "-",
+            "saldo_parcial": saldo_banco,
+        })
+
+        verificacion = round(saldo_contable + total_transitorias + total_permanentes, 2)
+        check_ok = abs(verificacion - saldo_banco) <= self._tolerancia
+
         return {
-            "conciliacion_id": reg.id,
-            "metodo": "forma_1",
-            "saldo_segun_contabilidad": saldo_contable,
-            "saldo_segun_banco": saldo_banco_empresa,
-            "saldo_banco_calculado": saldo_banco_calculado,
-            "saldo_banco_ajustado": saldo_banco_calculado,
-            "detalle_ajustes": {
-                "cheques_no_debitados": +totales["cheques_no_debitados"],
-                "depositos_no_acreditados": -totales["depositos_no_acreditados"],
-                "notas_debito_no_registradas": -totales["notas_debito_no_registradas"],
-                "notas_credito_no_registradas": +totales["notas_credito_no_registradas"],
-            },
-            "diferencia": diferencia,
-            "conciliado": conciliado,
-            "partidas_conciliatorias": [p.to_dict() for p in partidas_guardadas],
-        }
-
-    def conciliar_forma_2(self) -> dict:
-        """
-        Forma 2: Banco → Contabilidad
-        Parte del saldo del extracto bancario, aplica ajustes, llega al saldo contable.
-        """
-        self._limpiar_partidas_anteriores()
-        saldo_banco = self._obtener_saldo_banco()
-        saldo_banco_empresa = self._convertir_saldo_banco_a_empresa(saldo_banco)
-        partidas = self._identificar_partidas_empresa()
-        totales = self._agrupar_partidas(partidas)
-
-        saldo_contable_calculado = (
-            saldo_banco_empresa
-            - totales["cheques_no_debitados"]
-            + totales["depositos_no_acreditados"]
-            + totales["notas_debito_no_registradas"]
-            - totales["notas_credito_no_registradas"]
-        )
-
-        saldo_contable = self._obtener_saldo_contabilidad()
-        diferencia = round(saldo_contable_calculado - saldo_contable, 2)
-        conciliado = abs(diferencia) <= self._tolerancia
-        reg = self._guardar_conciliacion({
-            "fecha_cierre": self.fecha_hasta,
+            "conciliacion_id": conciliacion.id,
             "metodo": "desde_contabilidad",
-            "saldo_segun_banco": saldo_banco_empresa,
             "saldo_segun_contabilidad": saldo_contable,
-            "saldo_ajustado_banco": saldo_banco_empresa,
-            "saldo_ajustado_contabilidad": saldo_contable_calculado,
-            "diferencia": diferencia,
-            "estado": "conciliada" if conciliado else "pendiente_ajustes",
-        })
-        partidas_guardadas = self._guardar_todas_partidas(partidas)
-        return {
-            "conciliacion_id": reg.id,
-            "metodo": "forma_2",
-            "saldo_segun_banco": saldo_banco_empresa,
-            "saldo_segun_contabilidad": saldo_contable,
-            "saldo_contable_calculado": saldo_contable_calculado,
-            "saldo_contable_ajustado": saldo_contable_calculado,
-            "detalle_ajustes": {
-                "cheques_no_debitados": -totales["cheques_no_debitados"],
-                "depositos_no_acreditados": +totales["depositos_no_acreditados"],
-                "notas_debito_no_registradas": +totales["notas_debito_no_registradas"],
-                "notas_credito_no_registradas": -totales["notas_credito_no_registradas"],
-            },
+            "saldo_segun_banco": saldo_banco,
+            "saldo_ajustado": round(saldo_ajustado, 2),
             "diferencia": diferencia,
             "conciliado": conciliado,
+            "estado": estado,
+            "detalle_ajustes": [
+                {"tipo": p["tipo"], "descripcion": p["descripcion"], "monto": p["monto"], "signo": p["signo"]}
+                for p in partidas
+            ],
             "partidas_conciliatorias": [p.to_dict() for p in partidas_guardadas],
-        }
-
-    def conciliar_cuadrada(self) -> dict:
-        """
-        Forma 3 (Cuadrada): Ambas formas simultaneamente.
-        Forma 1: Contabilidad → Banco  (saldo contable + ajustes = saldo banco)
-        Forma 2: Banco → Contabilidad (saldo banco + ajustes = saldo contable)
-        Si ambas se cumplen, la conciliacion esta cuadrada y no hay error.
-        """
-        self._limpiar_partidas_anteriores()
-        cuenta = CuentaBancaria.obtener_por_id(self.cuenta_id)
-        if not cuenta:
-            raise ValueError(f"Cuenta {self.cuenta_id} no encontrada")
-
-        ultima_conciliacion = Conciliacion.obtener_ultima(self.cuenta_id, antes_de=self.fecha_desde)
-
-        saldo_banco_inicial = (
-            self._saldo_inicial_banco
-            if self._saldo_inicial_banco is not None
-            else (
-                ultima_conciliacion.saldo_ajustado_banco
-                if ultima_conciliacion and ultima_conciliacion.saldo_ajustado_banco is not None
-                else cuenta.saldo_inicial
-            )
-        )
-        saldo_contable_inicial = (
-            self._saldo_inicial_contable
-            if self._saldo_inicial_contable is not None
-            else (
-                ultima_conciliacion.saldo_ajustado_contabilidad
-                if ultima_conciliacion and ultima_conciliacion.saldo_ajustado_contabilidad is not None
-                else cuenta.saldo_inicial
-            )
-        )
-
-        partidas_anteriores = self._partidas_conciliatorias_mes_anterior()
-
-        movs_banco = self._movimientos_banco_periodo()
-        movs_contables = self._movimientos_contabilidad_periodo()
-        neto_banco = sum(m["haber"] - m["debe"] for m in movs_banco)
-        neto_contable = sum(m["debe"] - m["haber"] for m in movs_contables)
-
-        saldo_banco_final = saldo_banco_inicial + neto_banco
-        saldo_contable_final = saldo_contable_inicial + neto_contable
-        saldo_banco_final_empresa = self._convertir_saldo_banco_a_empresa(saldo_banco_final)
-
-        partidas = self._identificar_partidas_empresa()
-        totales = self._agrupar_partidas(partidas)
-
-        # Forma 1: Contabilidad → Banco
-        saldo_banco_calculado = (
-            saldo_contable_final
-            + totales["cheques_no_debitados"]
-            - totales["depositos_no_acreditados"]
-            - totales["notas_debito_no_registradas"]
-            + totales["notas_credito_no_registradas"]
-        )
-        dif_forma1 = round(saldo_banco_calculado - saldo_banco_final_empresa, 2)
-
-        # Forma 2: Banco → Contabilidad
-        saldo_contable_calculado = (
-            saldo_banco_final_empresa
-            - totales["cheques_no_debitados"]
-            + totales["depositos_no_acreditados"]
-            + totales["notas_debito_no_registradas"]
-            - totales["notas_credito_no_registradas"]
-        )
-        dif_forma2 = round(saldo_contable_calculado - saldo_contable_final, 2)
-
-        diferencia = max(abs(dif_forma1), abs(dif_forma2))
-        conciliado = diferencia <= self._tolerancia
-        reg = self._guardar_conciliacion({
-            "fecha_cierre": self.fecha_hasta,
-            "metodo": "cuadrada",
-            "saldo_segun_banco": saldo_banco_final_empresa,
-            "saldo_segun_contabilidad": saldo_contable_final,
-            "saldo_ajustado_banco": saldo_banco_calculado,
-            "saldo_ajustado_contabilidad": saldo_contable_calculado,
-            "diferencia": diferencia,
-            "estado": "conciliada" if conciliado else "pendiente_ajustes",
-        })
-        partidas_guardadas = self._guardar_todas_partidas(partidas)
-        return {
-            "conciliacion_id": reg.id,
-            "metodo": "cuadrada",
-            "conciliado": conciliado,
-            "diferencia": diferencia,
-            "saldos_apertura": {
-                "conciliacion_id": ultima_conciliacion.id if ultima_conciliacion else None,
-                "saldo_banco_inicial": saldo_banco_inicial,
-                "saldo_contable_inicial": saldo_contable_inicial,
-                "neto_banco": neto_banco,
-                "neto_contable": neto_contable,
+            "resumen": {
+                "total_transitorias": round(total_transitorias, 2),
+                "total_permanentes": round(total_permanentes, 2),
+                "total_positivas": round(total_positivas, 2),
+                "total_negativas": round(total_negativas, 2),
             },
-            "saldos_finales": {
-                "saldo_banco_final": saldo_banco_final_empresa,
-                "saldo_contable_final": saldo_contable_final,
+            "desarrollo": desarrollo,
+            "verificacion": {
+                "formula": "saldo_contable + total_transitorias + total_permanentes",
+                "saldo_contable": saldo_contable,
+                "total_transitorias": round(total_transitorias, 2),
+                "total_permanentes": round(total_permanentes, 2),
+                "resultado": verificacion,
+                "saldo_banco": saldo_banco,
+                "diferencia_sobrante": round(saldo_banco - verificacion, 2),
+                "consistente": check_ok,
             },
-            "partidas_mes_anterior": len(partidas_anteriores),
-            "movimientos_periodo": {
-                "cantidad_banco": len(movs_banco),
-                "cantidad_contabilidad": len(movs_contables),
-            },
-            "forma_1": {
-                "saldo_segun_contabilidad": saldo_contable_final,
-                "ajustes": {
-                    "cheques_no_debitados": +totales["cheques_no_debitados"],
-                    "depositos_no_acreditados": -totales["depositos_no_acreditados"],
-                    "notas_debito_no_registradas": -totales["notas_debito_no_registradas"],
-                    "notas_credito_no_registradas": +totales["notas_credito_no_registradas"],
-                },
-                "saldo_banco_calculado": saldo_banco_calculado,
-                "saldo_segun_banco": saldo_banco_final_empresa,
-                "diferencia": dif_forma1,
-            },
-            "forma_2": {
-                "saldo_segun_banco": saldo_banco_final_empresa,
-                "ajustes": {
-                    "cheques_no_debitados": -totales["cheques_no_debitados"],
-                    "depositos_no_acreditados": +totales["depositos_no_acreditados"],
-                    "notas_debito_no_registradas": +totales["notas_debito_no_registradas"],
-                    "notas_credito_no_registradas": -totales["notas_credito_no_registradas"],
-                },
-                "saldo_contable_calculado": saldo_contable_calculado,
-                "saldo_segun_contabilidad": saldo_contable_final,
-                "diferencia": dif_forma2,
-            },
-            "saldo_banco_ajustado": saldo_banco_calculado,
-            "saldo_contable_ajustado": saldo_contable_calculado,
-            "partidas_conciliatorias": [p.to_dict() for p in partidas_guardadas],
         }

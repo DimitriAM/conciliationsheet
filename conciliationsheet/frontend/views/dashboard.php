@@ -4,11 +4,7 @@
         <span id="cuentaInfo" style="background:#e3f2fd;color:#1565c0;padding:0.4rem 1rem;border-radius:8px;font-size:0.9rem;font-weight:600;display:none;"></span>
         <input type="date" id="fechaDesde">
         <input type="date" id="fechaHasta">
-        <select id="metodoSelect">
-            <option value="1">Forma 1: Contabilidad → Banco</option>
-            <option value="2">Forma 2: Banco → Contabilidad</option>
-            <option value="cuadrada">Forma 3: Cuadrada (ambas)</option>
-        </select>
+        <span style="padding:0.4rem 1rem;background:#e8f5e9;color:#2e7d32;border-radius:8px;font-size:0.9rem;font-weight:600;">Forma 1: Contabilidad → Banco</span>
         <button class="btn btn-primary" id="btnConciliar">Conciliar</button>
         <button class="btn btn-secondary" id="btnExportar" style="display:none;">Exportar</button>
     </div>

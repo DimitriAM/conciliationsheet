@@ -13,6 +13,7 @@ from routes.conciliate import conciliate_bp
 from routes.differences import differences_bp
 from routes.reports import reports_bp
 from routes.diccionario import diccionario_bp
+from routes.reset import reset_bp
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
@@ -33,6 +34,7 @@ app.register_blueprint(conciliate_bp)
 app.register_blueprint(differences_bp)
 app.register_blueprint(reports_bp)
 app.register_blueprint(diccionario_bp)
+app.register_blueprint(reset_bp)
 
 
 @app.route("/api/health", methods=["GET"])

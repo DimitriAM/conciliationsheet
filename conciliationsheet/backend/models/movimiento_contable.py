@@ -13,6 +13,7 @@ class MovimientoContable:
     descripcion: str = ""
     debe: float = 0.0
     haber: float = 0.0
+    saldo: Optional[float] = None
     comprobante: Optional[str] = None
     conciliado: bool = False
 
@@ -24,6 +25,7 @@ class MovimientoContable:
             "descripcion": self.descripcion,
             "debe": self.debe,
             "haber": self.haber,
+            "saldo": self.saldo,
             "comprobante": self.comprobante,
             "conciliado": bool(self.conciliado),
         }
@@ -37,6 +39,7 @@ class MovimientoContable:
             descripcion=row["descripcion"],
             debe=row["debe"],
             haber=row["haber"],
+            saldo=row.get("saldo"),
             comprobante=row["comprobante"],
             conciliado=bool(row["conciliado"]),
         )
@@ -48,17 +51,19 @@ class MovimientoContable:
         try:
             if self.id is None:
                 cursor = conn.execute(
-                    """INSERT INTO movimientos_contables (cuenta_id, fecha, descripcion, debe, haber, comprobante, conciliado)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (self.cuenta_id, self.fecha, self.descripcion, self.debe, self.haber, self.comprobante, int(self.conciliado)),
+                    """INSERT INTO movimientos_contables (cuenta_id, fecha, descripcion, debe, haber, saldo, comprobante, conciliado)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (self.cuenta_id, self.fecha, self.descripcion, self.debe, self.haber,
+                     self.saldo, self.comprobante, int(self.conciliado)),
                 )
                 self.id = cursor.lastrowid
             else:
                 conn.execute(
                     """UPDATE movimientos_contables
-                       SET cuenta_id=?, fecha=?, descripcion=?, debe=?, haber=?, comprobante=?, conciliado=?
+                       SET cuenta_id=?, fecha=?, descripcion=?, debe=?, haber=?, saldo=?, comprobante=?, conciliado=?
                        WHERE id=?""",
-                    (self.cuenta_id, self.fecha, self.descripcion, self.debe, self.haber, self.comprobante, int(self.conciliado), self.id),
+                    (self.cuenta_id, self.fecha, self.descripcion, self.debe, self.haber,
+                     self.saldo, self.comprobante, int(self.conciliado), self.id),
                 )
             conn.commit()
             return self.id
@@ -96,19 +101,5 @@ class MovimientoContable:
                 (cuenta_id,),
             ).fetchall()
             return [MovimientoContable.from_row(r) for r in rows]
-        finally:
-            conn.close()
-
-    @staticmethod
-    def calcular_saldo_periodo(cuenta_id: int, fecha_desde: str, fecha_hasta: str) -> float:
-        conn = get_connection()
-        try:
-            row = conn.execute(
-                """SELECT COALESCE(SUM(debe), 0) - COALESCE(SUM(haber), 0) AS saldo
-                   FROM movimientos_contables
-                   WHERE cuenta_id=? AND fecha BETWEEN ? AND ?""",
-                (cuenta_id, fecha_desde, fecha_hasta),
-            ).fetchone()
-            return row["saldo"] if row else 0.0
         finally:
             conn.close()

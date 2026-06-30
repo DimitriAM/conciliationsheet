@@ -30,6 +30,7 @@ def process_file():
     archivo = data.get("archivo")
     cuenta_id = data.get("cuenta_id")
     fuente = data.get("fuente")
+    saldo_final = data.get("saldo_final")
 
     if not all([archivo, cuenta_id, fuente]):
         return jsonify({"error": "Se requiere: archivo, cuenta_id, fuente"}), 400
@@ -70,12 +71,21 @@ def process_file():
             else:
                 conn.execute(
                     """INSERT INTO movimientos_contables
-                       (cuenta_id, fecha, descripcion, debe, haber, comprobante, conciliado)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (cuenta_id, fecha, descripcion, debe, haber, saldo, comprobante, conciliado)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (m.cuenta_id, m.fecha, m.descripcion, m.debe, m.haber,
-                     getattr(m, 'comprobante', None), 0),
+                     getattr(m, 'saldo', None), getattr(m, 'comprobante', None), 0),
                 )
             insertados += 1
+
+        if saldo_final is not None and insertados > 0:
+            tabla = "movimientos_bancarios" if fuente == "banco" else "movimientos_contables"
+            conn.execute(
+                f"""UPDATE {tabla} SET saldo=? WHERE id=(
+                    SELECT id FROM {tabla} WHERE cuenta_id=? ORDER BY fecha DESC, id DESC LIMIT 1
+                )""",
+                (saldo_final, cuenta_id),
+            )
         conn.commit()
     finally:
         conn.close()

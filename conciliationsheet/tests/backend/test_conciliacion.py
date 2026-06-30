@@ -7,131 +7,381 @@ from unittest.mock import MagicMock, patch
 from services.conciliador import ConciliadorBancario
 
 
-PARTIDAS_VACIAS = {
-    "cheques_no_debitados": [],
-    "depositos_no_acreditados": [],
-    "notas_debito_no_registradas": [],
-    "notas_credito_no_registradas": [],
-}
+def _make_mock_result(data):
+    m = MagicMock()
+    m.fetchall.return_value = data
+    return m
 
-PARTIDAS_EJEMPLO = {
-    "cheques_no_debitados": [{"monto": 500.0}],
-    "depositos_no_acreditados": [{"monto": 300.0}],
-    "notas_debito_no_registradas": [{"monto": 200.0}],
-    "notas_credito_no_registradas": [{"monto": 100.0}],
-}
+def _mock_conn(mock_get_conn, side_effects):
+    conn = MagicMock()
+    mock_get_conn.return_value = conn
+    conn.execute.side_effect = [_make_mock_result(se) for se in side_effects]
+    return conn
+
+
+class TestSaldos:
+    @patch("services.conciliador.get_connection")
+    def test_saldo_contable_ultimo_registro(self, mock_get_conn):
+        conn = MagicMock()
+        mock_get_conn.return_value = conn
+        row = MagicMock()
+        row.__getitem__.side_effect = lambda k: {"saldo": 15000.0}[k]
+        conn.execute.return_value.fetchone.return_value = row
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_hasta = "2025-06-30"
+        saldo = conciliador._obtener_saldo_contabilidad()
+
+        assert saldo == 15000.0
+        sql_llamado = conn.execute.call_args[0][0]
+        assert "ORDER BY fecha DESC, id DESC LIMIT 1" in sql_llamado
+        assert "sum" not in sql_llamado.lower()
+
+    @patch("services.conciliador.get_connection")
+    def test_saldo_banco_ultimo_registro(self, mock_get_conn):
+        conn = MagicMock()
+        mock_get_conn.return_value = conn
+        row = MagicMock()
+        row.__getitem__.side_effect = lambda k: {"saldo": 25000.0}[k]
+        conn.execute.return_value.fetchone.return_value = row
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_hasta = "2025-06-30"
+        saldo = conciliador._obtener_saldo_banco()
+
+        assert saldo == 25000.0
+        sql_llamado = conn.execute.call_args[0][0]
+        assert "ORDER BY fecha DESC, id DESC LIMIT 1" in sql_llamado
+        assert "sum" not in sql_llamado.lower()
+
+    @patch("services.conciliador.get_connection")
+    def test_saldo_sin_registros_retorna_cero(self, mock_get_conn):
+        conn = MagicMock()
+        mock_get_conn.return_value = conn
+        conn.execute.return_value.fetchone.return_value = None
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_hasta = "2025-06-30"
+        assert conciliador._obtener_saldo_contabilidad() == 0.0
+        assert conciliador._obtener_saldo_banco() == 0.0
+
+
+class TestIdentificarPartidas:
+    @patch("services.conciliador.get_connection")
+    def test_cheques_no_debitados(self, mock_get_conn):
+        _mock_conn(mock_get_conn, [
+            [{"id": 1, "fecha": "2025-06-15", "descripcion": "Cheque 001", "debe": 0, "haber": 500.0,
+              "saldo": None, "comprobante": "C-001", "conciliado": 0, "cuenta_id": 1}],
+            [],
+        ])
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_desde = "2025-06-01"
+        conciliador.fecha_hasta = "2025-06-30"
+        partidas = conciliador._identificar_partidas()
+
+        assert len(partidas) == 1
+        assert partidas[0]["tipo"] == "cheque_no_debitado"
+        assert partidas[0]["monto"] == 500.0
+        assert partidas[0]["signo"] == 1
+        assert partidas[0]["origen"] == "contabilidad"
+        assert partidas[0]["afecta"] == "banco"
+        assert partidas[0]["clasificacion"] == "transitoria"
+
+    @patch("services.conciliador.get_connection")
+    def test_depositos_no_acreditados(self, mock_get_conn):
+        _mock_conn(mock_get_conn, [
+            [{"id": 2, "fecha": "2025-06-20", "descripcion": "Deposito 001", "debe": 300.0, "haber": 0,
+              "saldo": None, "comprobante": None, "conciliado": 0, "cuenta_id": 1}],
+            [],
+        ])
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_desde = "2025-06-01"
+        conciliador.fecha_hasta = "2025-06-30"
+        partidas = conciliador._identificar_partidas()
+
+        assert len(partidas) == 1
+        assert partidas[0]["tipo"] == "deposito_no_acreditado"
+        assert partidas[0]["monto"] == 300.0
+        assert partidas[0]["signo"] == -1
+
+    @patch("services.conciliador.get_connection")
+    def test_diferencia_contabilidad_banco(self, mock_get_conn):
+        _mock_conn(mock_get_conn, [
+            [{"id": 1, "fecha": "2025-06-15", "descripcion": "PAGO PROVEEDOR", "debe": 0, "haber": 500.0,
+              "saldo": None, "comprobante": "C-001", "conciliado": 0, "cuenta_id": 1}],
+            [{"id": 10, "fecha": "2025-06-15", "descripcion": "PAGO PROVEEDOR", "debe": 480.0, "haber": 0,
+              "saldo": None, "tipo": "cheque", "conciliado": 0, "cuenta_id": 1}],
+        ])
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_desde = "2025-06-01"
+        conciliador.fecha_hasta = "2025-06-30"
+        partidas = conciliador._identificar_partidas()
+
+        # Debe generar 1 partida: diferencia_contabilidad (diferencia neta)
+        assert len(partidas) == 1
+        assert partidas[0]["tipo"] == "diferencia_contabilidad"
+        assert partidas[0]["origen"] == "contabilidad"
+        assert partidas[0]["clasificacion"] == "permanente"
+        assert partidas[0]["monto"] == 20.0
+        assert partidas[0]["signo"] == 1
+
+    @patch("services.conciliador.get_connection")
+    def test_diferencia_fuzzy_matching(self, mock_get_conn):
+        _mock_conn(mock_get_conn, [
+            [{"id": 1, "fecha": "2025-06-15", "descripcion": "CHEQUE 001 PAGO PROVEEDOR", "debe": 0, "haber": 500.0,
+              "saldo": None, "comprobante": "C-001", "conciliado": 0, "cuenta_id": 1}],
+            [{"id": 10, "fecha": "2025-06-15", "descripcion": "CHEQUE 002 PAGO PROVEEDOR", "debe": 480.0, "haber": 0,
+              "saldo": None, "tipo": "cheque", "conciliado": 0, "cuenta_id": 1}],
+        ])
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_desde = "2025-06-01"
+        conciliador.fecha_hasta = "2025-06-30"
+        partidas = conciliador._identificar_partidas()
+
+        assert len(partidas) == 1
+        assert partidas[0]["tipo"] == "diferencia_contabilidad"
+        assert partidas[0]["monto"] == 20.0
+        assert partidas[0]["signo"] == 1
+
+    @patch("services.conciliador.get_connection")
+    def test_diferencia_mismo_lado_debe(self, mock_get_conn):
+        """DEBE-DEBE: compra en contabilidad vs debito en banco, mismos keywords, montos distintos."""
+        _mock_conn(mock_get_conn, [
+            [{"id": 1, "fecha": "2025-06-15", "descripcion": "COMPRA DE ARTICULOS DE OFICINA", "debe": 500.0, "haber": 0,
+              "saldo": None, "comprobante": "C-001", "conciliado": 0, "cuenta_id": 1}],
+            [{"id": 10, "fecha": "2025-06-15", "descripcion": "DEBITO COMPRA - LIBRERIA", "debe": 480.0, "haber": 0,
+              "saldo": None, "tipo": "cheque", "conciliado": 0, "cuenta_id": 1}],
+        ])
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_desde = "2025-06-01"
+        conciliador.fecha_hasta = "2025-06-30"
+        partidas = conciliador._identificar_partidas()
+
+        assert len(partidas) == 1
+        assert partidas[0]["tipo"] == "diferencia_contabilidad"
+        assert partidas[0]["origen"] == "contabilidad"
+        assert partidas[0]["monto"] == 20.0
+        assert partidas[0]["signo"] == 1
+
+    @patch("services.conciliador.get_connection")
+    def test_diferencia_mismo_lado_haber(self, mock_get_conn):
+        """HABER-HABER: abono en contabilidad vs nota credito en banco, mismos keywords, montos distintos."""
+        _mock_conn(mock_get_conn, [
+            [{"id": 1, "fecha": "2025-06-15", "descripcion": "COBRANZA CLIENTE A", "debe": 0, "haber": 1000.0,
+              "saldo": None, "comprobante": "R-001", "conciliado": 0, "cuenta_id": 1}],
+            [{"id": 10, "fecha": "2025-06-15", "descripcion": "ACREDITACION COBRANZA", "debe": 0, "haber": 980.0,
+              "saldo": None, "tipo": "deposito", "conciliado": 0, "cuenta_id": 1}],
+        ])
+
+        conciliador = ConciliadorBancario()
+        conciliador.cuenta_id = 1
+        conciliador.fecha_desde = "2025-06-01"
+        conciliador.fecha_hasta = "2025-06-30"
+        partidas = conciliador._identificar_partidas()
+
+        assert len(partidas) == 1
+        assert partidas[0]["tipo"] == "diferencia_contabilidad"
+        assert partidas[0]["monto"] == 20.0
+        assert partidas[0]["signo"] == -1
 
 
 class TestConciliacionForma1:
     @patch.object(ConciliadorBancario, "_obtener_saldo_banco", return_value=10000.0)
     @patch.object(ConciliadorBancario, "_obtener_saldo_contabilidad", return_value=9500.0)
-    @patch.object(ConciliadorBancario, "_guardar_conciliacion", return_value=MagicMock(id=1))
-    @patch.object(ConciliadorBancario, "_guardar_todas_partidas", return_value=[])
-    def test_retorna_vision_empresa(
-        self, mock_guardar_todas, mock_guardar_conc, mock_saldo_cont, mock_saldo_banco
+    @patch.object(ConciliadorBancario, "_limpiar_partidas_anteriores")
+    def test_conciliacion_exitosa_sin_partidas(
+        self, mock_limpiar, mock_saldo_cont, mock_saldo_banco
     ):
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        with patch.object(conciliador, "_identificar_partidas_empresa", return_value=PARTIDAS_VACIAS):
-            result = conciliador.conciliar_forma_1()
-        assert result["vision"] == "empresa"
+        conciliador = ConciliadorBancario()
+        with patch.object(conciliador, "_identificar_partidas", return_value=[]):
+            with patch("services.conciliador.Conciliacion") as mock_conc_cls:
+                mock_conc = MagicMock()
+                mock_conc.id = 1
+                mock_conc_cls.return_value = mock_conc
+                with patch("services.conciliador.PartidaConciliatoria"):
+                    result = conciliador.conciliar_forma_1(1, "2025-06-01", "2025-06-30")
+
+        assert result["metodo"] == "desde_contabilidad"
+        assert result["saldo_segun_contabilidad"] == 9500.0
+        assert result["saldo_segun_banco"] == 10000.0
+        assert result["saldo_ajustado"] == 9500.0
+        assert result["diferencia"] == 500.0
+        assert result["conciliado"] is False
+        assert result["estado"] == "PENDIENTE"
+        assert result["resumen"]["total_transitorias"] == 0.0
+        assert result["resumen"]["total_permanentes"] == 0.0
+        assert len(result["detalle_ajustes"]) == 0
+        des = result["desarrollo"]
+        assert len(des) == 3
+        assert des[0]["descripcion"] == "SALDO CONTABLE"
+        assert des[0]["saldo_parcial"] == 9500.0
+        assert des[1]["descripcion"] == "SALDO CALCULADO"
+        assert des[1]["saldo_parcial"] == 9500.0
+        assert des[2]["descripcion"] == "SALDO BANCO (segun extracto)"
+        assert des[2]["saldo_parcial"] == 10000.0
 
     @patch.object(ConciliadorBancario, "_obtener_saldo_banco", return_value=10000.0)
     @patch.object(ConciliadorBancario, "_obtener_saldo_contabilidad", return_value=9500.0)
-    @patch.object(ConciliadorBancario, "_guardar_conciliacion", return_value=MagicMock(id=1))
-    @patch.object(ConciliadorBancario, "_guardar_todas_partidas", return_value=[])
-    def test_signos_ajuste(
-        self, mock_guardar_todas, mock_guardar_conc, mock_saldo_cont, mock_saldo_banco
+    @patch.object(ConciliadorBancario, "_limpiar_partidas_anteriores")
+    def test_conciliacion_con_partidas(
+        self, mock_limpiar, mock_saldo_cont, mock_saldo_banco
     ):
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        with patch.object(conciliador, "_identificar_partidas_empresa", return_value=PARTIDAS_EJEMPLO):
-            result = conciliador.conciliar_forma_1()
-        assert result["ajustes_banco"]["cheques_no_debitados"] == -500.0
-        assert result["ajustes_banco"]["depositos_no_acreditados"] == 300.0
-        assert result["ajustes_contabilidad"]["notas_debito_no_registradas"] == -200.0
-        assert result["ajustes_contabilidad"]["notas_credito_no_registradas"] == 100.0
+        partidas = [
+            {"fecha": "2025-06-15", "descripcion": "Cheque 001", "monto": 500.0, "signo": 1,
+             "origen": "contabilidad", "tipo": "cheque_no_debitado", "afecta": "banco", "clasificacion": "transitoria"},
+            {"fecha": "2025-06-20", "descripcion": "Deposito 001", "monto": 300.0, "signo": -1,
+             "origen": "contabilidad", "tipo": "deposito_no_acreditado", "afecta": "banco", "clasificacion": "transitoria"},
+            {"fecha": "2025-06-30", "descripcion": "Comision", "monto": 200.0, "signo": -1,
+             "origen": "banco", "tipo": "nota_debito_no_registrada", "afecta": "contabilidad", "clasificacion": "permanente"},
+        ]
 
-    @patch.object(ConciliadorBancario, "_obtener_saldo_banco", return_value=10000.0)
+        conciliador = ConciliadorBancario()
+        with patch.object(conciliador, "_identificar_partidas", return_value=partidas):
+            with patch("services.conciliador.Conciliacion") as mock_conc_cls:
+                mock_conc = MagicMock()
+                mock_conc.id = 1
+                mock_conc_cls.return_value = mock_conc
+                with patch("services.conciliador.PartidaConciliatoria") as mock_part_cls:
+                    mock_part = MagicMock()
+                    mock_part.to_dict.return_value = {"id": 1}
+                    mock_part_cls.return_value = mock_part
+                    result = conciliador.conciliar_forma_1(1, "2025-06-01", "2025-06-30")
+
+        # transitorias: 500*1 + 300*(-1) = 200; permanentes: 200*(-1) = -200
+        # saldo_ajustado = 9500 + 200 - 200 = 9500
+        assert result["saldo_ajustado"] == 9500.0
+        assert result["diferencia"] == 500.0
+        assert result["conciliado"] is False
+        assert result["estado"] == "PENDIENTE"
+        assert result["resumen"]["total_transitorias"] == 200.0
+        assert result["resumen"]["total_permanentes"] == -200.0
+        assert len(result["detalle_ajustes"]) == 3
+        des = result["desarrollo"]
+        assert len(des) == 6  # 1 + 3 partidas + 2 fin
+        assert des[0]["saldo_parcial"] == 9500.0
+        assert des[1]["saldo_parcial"] == 10000.0
+        assert des[2]["saldo_parcial"] == 9700.0
+        assert des[3]["saldo_parcial"] == 9500.0
+        assert des[4]["descripcion"] == "SALDO CALCULADO"
+        assert des[4]["saldo_parcial"] == 9500.0
+        assert des[5]["descripcion"] == "SALDO BANCO (segun extracto)"
+        assert des[5]["saldo_parcial"] == 10000.0
+
+    @patch.object(ConciliadorBancario, "_obtener_saldo_banco", return_value=9500.0)
     @patch.object(ConciliadorBancario, "_obtener_saldo_contabilidad", return_value=9500.0)
-    @patch.object(ConciliadorBancario, "_guardar_conciliacion", return_value=MagicMock(id=1))
-    @patch.object(ConciliadorBancario, "_guardar_todas_partidas", return_value=[])
-    def test_diferencia_calculada(
-        self, mock_guardar_todas, mock_guardar_conc, mock_saldo_cont, mock_saldo_banco
+    @patch.object(ConciliadorBancario, "_limpiar_partidas_anteriores")
+    def test_conciliacion_conciliada(
+        self, mock_limpiar, mock_saldo_cont, mock_saldo_banco
     ):
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        with patch.object(conciliador, "_identificar_partidas_empresa", return_value=PARTIDAS_EJEMPLO):
-            result = conciliador.conciliar_forma_1()
-        # saldo_banco_ajustado = 10000 - 500 + 300 = 9800
-        # saldo_contable_ajustado = 9500 - 200 + 100 = 9400
-        # diferencia = 9800 - 9400 = 400
-        assert result["saldo_banco_ajustado"] == 9800.0
-        assert result["saldo_contable_ajustado"] == 9400.0
-        assert result["diferencia"] == 400.0
+        conciliador = ConciliadorBancario()
+        with patch.object(conciliador, "_identificar_partidas", return_value=[]):
+            with patch("services.conciliador.Conciliacion") as mock_conc_cls:
+                mock_conc = MagicMock()
+                mock_conc.id = 1
+                mock_conc_cls.return_value = mock_conc
+                with patch("services.conciliador.PartidaConciliatoria"):
+                    result = conciliador.conciliar_forma_1(1, "2025-06-01", "2025-06-30")
 
-
-class TestPartidasClasificacion:
-    @patch("services.conciliador.PartidaConciliatoria.to_dict", return_value={})
-    @patch("services.conciliador.PartidaConciliatoria.guardar")
-    def test_cheque_es_transitoria(self, mock_guardar, mock_to_dict):
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        item = {"fecha": "2025-06-15", "descripcion": "Cheque 001", "monto": 500.0, "comprobante": "C-001"}
-        pc = conciliador._guardar_partida_conciliatoria("cheques_no_debitados", item)
-        assert pc.tipo == "transitoria"
-        assert pc.origen == "contabilidad_no_banco"
-        assert pc.debe == 500.0
-        assert pc.haber == 0.0
-
-    @patch("services.conciliador.PartidaConciliatoria.to_dict", return_value={})
-    @patch("services.conciliador.PartidaConciliatoria.guardar")
-    def test_deposito_es_transitoria(self, mock_guardar, mock_to_dict):
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        item = {"fecha": "2025-06-15", "descripcion": "Deposito 001", "monto": 300.0}
-        pc = conciliador._guardar_partida_conciliatoria("depositos_no_acreditados", item)
-        assert pc.tipo == "transitoria"
-        assert pc.debe == 0.0
-        assert pc.haber == 300.0
-
-    @patch("services.conciliador.PartidaConciliatoria.to_dict", return_value={})
-    @patch("services.conciliador.PartidaConciliatoria.guardar")
-    def test_nota_debito_es_permanente(self, mock_guardar, mock_to_dict):
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        item = {"fecha": "2025-06-30", "descripcion": "Comision bancaria", "monto": 35.0, "tipo": "ND"}
-        pc = conciliador._guardar_partida_conciliatoria("notas_debito_no_registradas", item)
-        assert pc.tipo == "permanente"
-        assert pc.origen == "banco_no_contabilizado"
-        assert pc.debe == 35.0
-        assert pc.haber == 0.0
-
-    @patch("services.conciliador.PartidaConciliatoria.to_dict", return_value={})
-    @patch("services.conciliador.PartidaConciliatoria.guardar")
-    def test_nota_credito_es_permanente(self, mock_guardar, mock_to_dict):
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        item = {"fecha": "2025-06-30", "descripcion": "Interes ganado", "monto": 50.0, "tipo": "NC"}
-        pc = conciliador._guardar_partida_conciliatoria("notas_credito_no_registradas", item)
-        assert pc.tipo == "permanente"
-        assert pc.debe == 0.0
-        assert pc.haber == 50.0
-
-
-class TestConciliacionCuadrada:
-    @patch.object(ConciliadorBancario, "_guardar_conciliacion", return_value=MagicMock(id=1))
-    @patch.object(ConciliadorBancario, "_guardar_todas_partidas", return_value=[])
-    @patch.object(ConciliadorBancario, "_partidas_conciliatorias_mes_anterior", return_value=[])
-    @patch.object(ConciliadorBancario, "_movimientos_banco_periodo", return_value=[])
-    @patch.object(ConciliadorBancario, "_movimientos_contabilidad_periodo", return_value=[])
-    @patch("services.conciliador.CuentaBancaria.obtener_por_id")
-    @patch("services.conciliador.Conciliacion.obtener_ultima", return_value=None)
-    def test_verifica_ambos_lados(
-        self, mock_obtener_ultima, mock_cuenta,
-        mock_mov_cont, mock_mov_banco, mock_partidas_ant,
-        mock_guardar_todas, mock_guardar_conc
-    ):
-        mock_cuenta.return_value = MagicMock(saldo_inicial=8000.0)
-        conciliador = ConciliadorBancario(1, "2025-06-01", "2025-06-30")
-        with patch.object(conciliador, "_identificar_partidas_empresa", return_value=PARTIDAS_VACIAS):
-            result = conciliador.conciliar_cuadrada()
-        assert result["metodo"] == "cuadrada"
-        assert result["vision"] == "empresa"
-        assert result["saldo_banco_ajustado"] == 8000.0
-        assert result["saldo_contable_ajustado"] == 8000.0
         assert result["diferencia"] == 0.0
         assert result["conciliado"] is True
+        assert result["estado"] == "CONCILIADO"
+        assert result["resumen"]["total_transitorias"] == 0.0
+        assert result["resumen"]["total_permanentes"] == 0.0
+        des = result["desarrollo"]
+        assert len(des) == 3
+        assert des[0]["descripcion"] == "SALDO CONTABLE"
+        assert des[0]["saldo_parcial"] == 9500.0
+        assert des[1]["descripcion"] == "SALDO CALCULADO"
+        assert des[1]["saldo_parcial"] == 9500.0
+        assert des[2]["descripcion"] == "SALDO BANCO (segun extracto)"
+        assert des[2]["saldo_parcial"] == 9500.0
+
+    @patch.object(ConciliadorBancario, "_obtener_saldo_banco", return_value=1569500.0)
+    @patch.object(ConciliadorBancario, "_obtener_saldo_contabilidad", return_value=1450000.0)
+    @patch.object(ConciliadorBancario, "_limpiar_partidas_anteriores")
+    def test_conciliacion_ejemplo_completo(
+        self, mock_limpiar, mock_saldo_cont, mock_saldo_banco
+    ):
+        partidas = [
+            {"fecha": "2026-07-10", "descripcion": "COMPRA DE ARTICULOS DE OFICINA", "monto": 20000.0, "signo": 1,
+             "origen": "contabilidad", "tipo": "diferencia_contabilidad", "afecta": "banco", "clasificacion": "permanente"},
+            {"fecha": "2026-07-20", "descripcion": "PAGO DE ALQUILER COMERCIAL", "monto": 5000.0, "signo": 1,
+             "origen": "contabilidad", "tipo": "diferencia_contabilidad", "afecta": "banco", "clasificacion": "permanente"},
+            {"fecha": "2026-07-28", "descripcion": "CHEQUE EMITIDO NRO 8821", "monto": 115000.0, "signo": 1,
+             "origen": "contabilidad", "tipo": "cheque_no_debitado", "afecta": "banco", "clasificacion": "transitoria"},
+            {"fecha": "2026-07-29", "descripcion": "COMISION POR CHEQUERA", "monto": 8500.0, "signo": -1,
+             "origen": "banco", "tipo": "nota_debito_no_registrada", "afecta": "contabilidad", "clasificacion": "permanente"},
+            {"fecha": "2026-07-31", "descripcion": "CARGO POR MANTENIMIENTO", "monto": 12000.0, "signo": -1,
+             "origen": "banco", "tipo": "nota_debito_no_registrada", "afecta": "contabilidad", "clasificacion": "permanente"},
+        ]
+
+        conciliador = ConciliadorBancario()
+        with patch.object(conciliador, "_identificar_partidas", return_value=partidas):
+            with patch("services.conciliador.Conciliacion") as mock_conc_cls:
+                mock_conc = MagicMock()
+                mock_conc.id = 1
+                mock_conc_cls.return_value = mock_conc
+                with patch("services.conciliador.PartidaConciliatoria") as mock_part_cls:
+                    mock_part = MagicMock()
+                    mock_part.to_dict.return_value = {"id": 1}
+                    mock_part_cls.return_value = mock_part
+                    result = conciliador.conciliar_forma_1(1, "2026-07-01", "2026-07-31")
+
+        # transitorias (solo cheque_no_debitado): 115000*1 = 115000
+        # permanentes: 20000*1 + 5000*1 - 8500 - 12000 = 4500
+        # saldo_ajustado = 1450000 + 115000 + 4500 = 1569500
+        # diferencia = 1569500 - 1569500 = 0 -> CONCILIADO
+        assert result["saldo_segun_contabilidad"] == 1450000.0
+        assert result["saldo_segun_banco"] == 1569500.0
+        assert result["resumen"]["total_transitorias"] == 115000.0
+        assert result["resumen"]["total_permanentes"] == 4500.0
+        assert result["resumen"]["total_positivas"] == 140000.0
+        assert result["resumen"]["total_negativas"] == -20500.0
+        assert result["saldo_ajustado"] == 1569500.0
+        assert result["diferencia"] == 0.0
+        assert result["conciliado"] is True
+        assert result["estado"] == "CONCILIADO"
+        assert len(result["detalle_ajustes"]) == 5
+
+        # Verificar desarrollo
+        des = result["desarrollo"]
+        assert len(des) == 8  # 1 inicio + 5 partidas + 2 fin (calculado + banco)
+        assert des[0]["descripcion"] == "SALDO CONTABLE"
+        assert des[0]["saldo_parcial"] == 1450000.0
+        assert des[1]["descripcion"] == "COMPRA DE ARTICULOS DE OFICINA"
+        assert des[1]["monto"] == 20000.0
+        assert des[1]["efecto"] == "Suma"
+        assert des[1]["saldo_parcial"] == 1470000.0
+        assert des[2]["descripcion"] == "PAGO DE ALQUILER COMERCIAL"
+        assert des[2]["monto"] == 5000.0
+        assert des[2]["efecto"] == "Suma"
+        assert des[2]["saldo_parcial"] == 1475000.0
+        assert des[3]["descripcion"] == "CHEQUE EMITIDO NRO 8821"
+        assert des[3]["monto"] == 115000.0
+        assert des[3]["efecto"] == "Suma"
+        assert des[3]["saldo_parcial"] == 1590000.0
+        assert des[4]["descripcion"] == "COMISION POR CHEQUERA"
+        assert des[4]["monto"] == -8500.0
+        assert des[4]["efecto"] == "Resta"
+        assert des[4]["saldo_parcial"] == 1581500.0
+        assert des[5]["descripcion"] == "CARGO POR MANTENIMIENTO"
+        assert des[5]["monto"] == -12000.0
+        assert des[5]["efecto"] == "Resta"
+        assert des[5]["saldo_parcial"] == 1569500.0
+        assert des[6]["descripcion"] == "SALDO CALCULADO"
+        assert des[6]["saldo_parcial"] == 1569500.0
+        assert des[7]["descripcion"] == "SALDO BANCO (segun extracto)"
+        assert des[7]["saldo_parcial"] == 1569500.0

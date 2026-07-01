@@ -15,8 +15,8 @@ def run_conciliation():
         return jsonify({"error": "Se requieren datos JSON"}), 400
 
     metodo = data.get("metodo", "")
-    if metodo != "desde_contabilidad":
-        return jsonify({"error": "Metodo invalido. Unico metodo aceptado: desde_contabilidad"}), 400
+    if metodo not in ("desde_contabilidad", "desde_banco"):
+        return jsonify({"error": "Metodo invalido. Metodos aceptados: desde_contabilidad, desde_banco"}), 400
 
     cuenta_id = data.get("cuenta_id")
     fecha_desde = data.get("fecha_desde")
@@ -27,7 +27,10 @@ def run_conciliation():
 
     try:
         conciliador = ConciliadorBancario()
-        resultado = conciliador.conciliar_forma_1(cuenta_id, fecha_desde, fecha_hasta)
+        if metodo == "desde_contabilidad":
+            resultado = conciliador.conciliar_forma_1(cuenta_id, fecha_desde, fecha_hasta)
+        else:
+            resultado = conciliador.conciliar_forma_2(cuenta_id, fecha_desde, fecha_hasta)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:

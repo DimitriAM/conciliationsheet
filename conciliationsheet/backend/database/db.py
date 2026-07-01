@@ -107,6 +107,34 @@ def _migrate_v2(conn: sqlite3.Connection):
     """)
 
 
+def _migrate_v3(conn: sqlite3.Connection):
+    conn.executescript("""
+        PRAGMA foreign_keys = OFF;
+        ALTER TABLE conciliaciones RENAME TO conciliaciones_old;
+        CREATE TABLE conciliaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cuenta_id INTEGER NOT NULL,
+            fecha_cierre DATE NOT NULL,
+            metodo TEXT CHECK(metodo IN ('desde_contabilidad', 'desde_banco')),
+            vision TEXT DEFAULT 'empresa' CHECK(vision IN ('empresa','banco')),
+            saldo_segun_banco REAL,
+            saldo_segun_contabilidad REAL,
+            saldo_ajustado_banco REAL,
+            saldo_ajustado_contabilidad REAL,
+            diferencia_total REAL,
+            estado TEXT DEFAULT 'en_proceso' CHECK(estado IN ('en_proceso','conciliada','pendiente_ajustes')),
+            fecha_conciliacion DATETIME DEFAULT CURRENT_TIMESTAMP,
+            observaciones TEXT,
+            FOREIGN KEY (cuenta_id) REFERENCES cuentas_bancarias(id) ON DELETE CASCADE
+        );
+        INSERT INTO conciliaciones SELECT * FROM conciliaciones_old;
+        DROP TABLE conciliaciones_old;
+        CREATE INDEX IF NOT EXISTS idx_conciliaciones_cuenta ON conciliaciones(cuenta_id);
+        PRAGMA foreign_keys = ON;
+        PRAGMA user_version = 3;
+    """)
+
+
 def init_database() -> None:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection()
@@ -119,6 +147,9 @@ def init_database() -> None:
             conn.commit()
         elif version == 1:
             _migrate_v2(conn)
+            conn.commit()
+        if version <= 2:
+            _migrate_v3(conn)
             conn.commit()
     finally:
         conn.close()

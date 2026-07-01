@@ -83,7 +83,7 @@ CREATE TABLE conciliaciones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cuenta_id INTEGER NOT NULL,
     fecha_cierre DATE NOT NULL,
-    metodo TEXT CHECK(metodo IN ('desde_contabilidad')),
+    metodo TEXT CHECK(metodo IN ('desde_contabilidad', 'desde_banco')),
     vision TEXT DEFAULT 'empresa' CHECK(vision IN ('empresa','banco')),
     saldo_segun_banco REAL,
     saldo_segun_contabilidad REAL,

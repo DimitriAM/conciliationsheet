@@ -4,7 +4,10 @@
         <span id="cuentaInfo" style="background:#e3f2fd;color:#1565c0;padding:0.4rem 1rem;border-radius:8px;font-size:0.9rem;font-weight:600;display:none;"></span>
         <input type="date" id="fechaDesde">
         <input type="date" id="fechaHasta">
-        <span style="padding:0.4rem 1rem;background:#e8f5e9;color:#2e7d32;border-radius:8px;font-size:0.9rem;font-weight:600;">Forma 1: Contabilidad → Banco</span>
+        <select id="metodoSelector" style="padding:0.4rem 1rem;border-radius:8px;font-size:0.9rem;font-weight:600;background:#e8f5e9;color:#2e7d32;border:2px solid #2e7d32;">
+            <option value="desde_contabilidad">Forma 1: Contabilidad → Banco</option>
+            <option value="desde_banco">Forma 2: Banco → Contabilidad</option>
+        </select>
         <button class="btn btn-primary" id="btnConciliar">Conciliar</button>
         <button class="btn btn-secondary" id="btnExportar" style="display:none;">Exportar</button>
     </div>

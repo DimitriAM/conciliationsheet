@@ -317,7 +317,7 @@ class ConciliadorBancario:
         finally:
             conn.close()
 
-    def conciliar_forma_1(self, cuenta_id: int, fecha_desde: str, fecha_hasta: str) -> dict:
+    def _conciliar(self, cuenta_id: int, fecha_desde: str, fecha_hasta: str, metodo: str) -> dict:
         self.cuenta_id = cuenta_id
         self.fecha_desde = fecha_desde
         self.fecha_hasta = fecha_hasta
@@ -332,20 +332,36 @@ class ConciliadorBancario:
         total_permanentes = sum(p["monto"] * p["signo"] for p in partidas if p["clasificacion"] == "permanente")
         total_positivas = sum(p["monto"] * p["signo"] for p in partidas if p["signo"] == 1)
         total_negativas = sum(p["monto"] * p["signo"] for p in partidas if p["signo"] == -1)
-        saldo_ajustado = round(saldo_contable + total_transitorias + total_permanentes, 2)
 
-        diferencia = round(saldo_banco - saldo_ajustado, 2)
+        desde_contabilidad = metodo == "desde_contabilidad"
+        signo_factor = 1 if desde_contabilidad else -1
+
+        if desde_contabilidad:
+            saldo_ajustado = round(saldo_contable + total_transitorias + total_permanentes, 2)
+            diferencia = round(saldo_banco - saldo_ajustado, 2)
+            label_inicio = "SALDO CONTABLE"
+            label_final = "SALDO BANCO (segun extracto)"
+            saldo_ajustado_banco = saldo_ajustado
+            saldo_ajustado_contabilidad = saldo_contable
+        else:
+            saldo_ajustado = round(saldo_banco - total_transitorias - total_permanentes, 2)
+            diferencia = round(saldo_contable - saldo_ajustado, 2)
+            label_inicio = "SALDO BANCO (segun extracto)"
+            label_final = "SALDO CONTABLE (segun libros)"
+            saldo_ajustado_banco = saldo_banco
+            saldo_ajustado_contabilidad = saldo_ajustado
+
         conciliado = abs(diferencia) <= self._tolerancia
 
         conciliacion = Conciliacion(
             cuenta_id=self.cuenta_id,
             fecha_cierre=self.fecha_hasta,
-            metodo="desde_contabilidad",
+            metodo=metodo,
             vision="empresa",
             saldo_segun_banco=saldo_banco,
             saldo_segun_contabilidad=saldo_contable,
-            saldo_ajustado_banco=saldo_ajustado,
-            saldo_ajustado_contabilidad=saldo_contable,
+            saldo_ajustado_banco=saldo_ajustado_banco,
+            saldo_ajustado_contabilidad=saldo_ajustado_contabilidad,
             diferencia_total=diferencia,
             estado="conciliada" if conciliado else "pendiente_ajustes",
         )
@@ -372,18 +388,18 @@ class ConciliadorBancario:
 
         partidas_ordenadas = sorted(partidas, key=lambda p: (p.get("fecha", ""), p.get("descripcion", "")))
         desarrollo = []
-        saldo_parcial = saldo_contable
+        saldo_inicial = saldo_contable if desde_contabilidad else saldo_banco
+        saldo_parcial = saldo_inicial
         desarrollo.append({
             "fecha": "-",
-            "descripcion": "SALDO CONTABLE",
+            "descripcion": label_inicio,
             "monto": "-",
             "efecto": "-",
             "saldo_parcial": saldo_parcial,
         })
         for p in partidas_ordenadas:
             if "_monto_cont" in p:
-                # Mostrar ambas caras de la diferencia (contabilidad y banco)
-                mc_monto = round(p["_monto_cont"] * p["_signo_cont"], 2)
+                mc_monto = round(p["_monto_cont"] * p["_signo_cont"] * signo_factor, 2)
                 saldo_parcial = round(saldo_parcial + mc_monto, 2)
                 desarrollo.append({
                     "fecha": p["fecha"],
@@ -392,7 +408,7 @@ class ConciliadorBancario:
                     "efecto": "Suma" if mc_monto > 0 else "Resta",
                     "saldo_parcial": saldo_parcial,
                 })
-                mb_monto = round(p["_monto_banco"] * p["_signo_banco"], 2)
+                mb_monto = round(p["_monto_banco"] * p["_signo_banco"] * signo_factor, 2)
                 saldo_parcial = round(saldo_parcial + mb_monto, 2)
                 desarrollo.append({
                     "fecha": p["fecha"],
@@ -402,7 +418,7 @@ class ConciliadorBancario:
                     "saldo_parcial": saldo_parcial,
                 })
             else:
-                monto_con_signo = round(p["monto"] * p["signo"], 2)
+                monto_con_signo = round(p["monto"] * p["signo"] * signo_factor, 2)
                 saldo_parcial = round(saldo_parcial + monto_con_signo, 2)
                 desarrollo.append({
                     "fecha": p["fecha"],
@@ -416,22 +432,32 @@ class ConciliadorBancario:
             "descripcion": "SALDO CALCULADO",
             "monto": "-",
             "efecto": "-",
-            "saldo_parcial": round(saldo_contable + total_transitorias + total_permanentes, 2),
+            "saldo_parcial": round(saldo_inicial + sum(p["monto"] * p["signo"] * signo_factor for p in partidas_ordenadas), 2),
         })
         desarrollo.append({
             "fecha": "-",
-            "descripcion": "SALDO BANCO (segun extracto)",
+            "descripcion": label_final,
             "monto": "-",
             "efecto": "-",
-            "saldo_parcial": saldo_banco,
+            "saldo_parcial": saldo_contable if not desde_contabilidad else saldo_banco,
         })
 
-        verificacion = round(saldo_contable + total_transitorias + total_permanentes, 2)
-        check_ok = abs(verificacion - saldo_banco) <= self._tolerancia
+        if desde_contabilidad:
+            verificacion = round(saldo_contable + total_transitorias + total_permanentes, 2)
+            check_ok = abs(verificacion - saldo_banco) <= self._tolerancia
+            formula_label = "saldo_contable + total_transitorias + total_permanentes"
+            verificacion_saldo_banco = saldo_banco
+            diferencia_sobrante = round(saldo_banco - verificacion, 2)
+        else:
+            verificacion = round(saldo_banco - total_transitorias - total_permanentes, 2)
+            check_ok = abs(verificacion - saldo_contable) <= self._tolerancia
+            formula_label = "saldo_banco - total_transitorias - total_permanentes"
+            verificacion_saldo_banco = saldo_contable
+            diferencia_sobrante = round(saldo_contable - verificacion, 2)
 
         return {
             "conciliacion_id": conciliacion.id,
-            "metodo": "desde_contabilidad",
+            "metodo": metodo,
             "saldo_segun_contabilidad": saldo_contable,
             "saldo_segun_banco": saldo_banco,
             "saldo_ajustado": round(saldo_ajustado, 2),
@@ -451,13 +477,19 @@ class ConciliadorBancario:
             },
             "desarrollo": desarrollo,
             "verificacion": {
-                "formula": "saldo_contable + total_transitorias + total_permanentes",
+                "formula": formula_label,
                 "saldo_contable": saldo_contable,
                 "total_transitorias": round(total_transitorias, 2),
                 "total_permanentes": round(total_permanentes, 2),
                 "resultado": verificacion,
-                "saldo_banco": saldo_banco,
-                "diferencia_sobrante": round(saldo_banco - verificacion, 2),
+                "saldo_banco": verificacion_saldo_banco,
+                "diferencia_sobrante": diferencia_sobrante,
                 "consistente": check_ok,
             },
         }
+
+    def conciliar_forma_1(self, cuenta_id: int, fecha_desde: str, fecha_hasta: str) -> dict:
+        return self._conciliar(cuenta_id, fecha_desde, fecha_hasta, "desde_contabilidad")
+
+    def conciliar_forma_2(self, cuenta_id: int, fecha_desde: str, fecha_hasta: str) -> dict:
+        return self._conciliar(cuenta_id, fecha_desde, fecha_hasta, "desde_banco")

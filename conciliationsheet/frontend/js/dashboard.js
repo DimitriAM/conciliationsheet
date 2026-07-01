@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     btnConciliar.addEventListener('click', async () => {
         const fechaDesde = document.getElementById('fechaDesde').value;
         const fechaHasta = document.getElementById('fechaHasta').value;
+        const metodo = document.getElementById('metodoSelector').value;
 
         if (!fechaDesde || !fechaHasta) { notify('Seleccione fechas', 'error'); return; }
         if (!defaultCuentaId) { notify('No hay cuenta disponible', 'error'); return; }
@@ -26,7 +27,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     cuenta_id: defaultCuentaId,
                     fecha_desde: fechaDesde,
                     fecha_hasta: fechaHasta,
-                    metodo: "desde_contabilidad",
+                    metodo: metodo,
                     vision: "empresa",
                 }),
             });
@@ -71,16 +72,18 @@ function mostrarResultados(data) {
     const grid = document.getElementById('resultadosGrid');
     const detalles = document.getElementById('detallesConciliacion');
 
+    const metodoLabel = data.metodo === 'desde_banco' ? 'Forma 2: Banco → Contabilidad' : 'Forma 1: Contabilidad → Banco';
+
     grid.innerHTML = '';
 
-    // Tabla de desarrollo: paso a paso desde saldo contable hasta saldo banco
+    // Tabla de desarrollo: paso a paso
     let dt = '';
     if (data.desarrollo && data.desarrollo.length) {
-        dt += '<div class="card"><h2>Desarrollo de la Conciliación</h2><table class="desarrollo-table"><thead><tr>'
+        dt += '<div class="card"><h2>Desarrollo de la Conciliación (' + metodoLabel + ')</h2><table class="desarrollo-table"><thead><tr>'
             + '<th>Fecha</th><th>Descripción</th><th>Monto</th><th>Efecto</th><th>Saldo Parcial</th>'
             + '</tr></thead><tbody>';
         for (const r of data.desarrollo) {
-            const cls = r.descripcion === 'SALDO CONTABLE' || r.descripcion === 'SALDO CALCULADO' || r.descripcion === 'SALDO BANCO (segun extracto)' ? ' class="destacado"' : '';
+            const cls = r.descripcion === 'SALDO CONTABLE' || r.descripcion === 'SALDO CALCULADO' || r.descripcion === 'SALDO BANCO (segun extracto)' || r.descripcion === 'SALDO CONTABLE (segun libros)' ? ' class="destacado"' : '';
             dt += '<tr' + cls + '>'
                 + '<td>' + (r.fecha || '') + '</td>'
                 + '<td>' + (r.descripcion || '') + '</td>'
